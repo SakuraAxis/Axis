@@ -5,7 +5,7 @@
 
 <br>
 
-Axis - 3D Physics Simulation FFI For Web / Unity. - Julia / Rust / C#.
+### Axis - 3D Physics Simulation FFI For Web / Unity. - Julia / Rust / C#.
 
 IMPORTANT : This project is still in the development and testing stages, licensing terms may be updated in the future. Please don't do any commercial usage currently.
 
