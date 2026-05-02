@@ -1,0 +1,11 @@
+[package]
+name = "axis_rs"
+version = "0.1.0"
+edition = "2024"
+
+crate-type = ["cdylib"]
+
+[dependencies]
+cudarc = { version = "0.19.4", features = ["cuda-13010"] }
+rand = "0.10.1"
+rand_distr = "0.6.0"
