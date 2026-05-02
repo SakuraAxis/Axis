@@ -24,6 +24,15 @@ Axis uses cudarc to call NVIDIA GPUs for parallel computing. cudarc licensed und
 
 install at NVDIA Website : [https://developer.nvidia.com/cuda/toolkit](https://developer.nvidia.com/cuda/toolkit)
 
+### Step 2. Change cudarc version at `axis_rs/Cargo.toml`
+
+For example, if you use CUDA Toolkit 13.1, edit version to below
+
+```toml
+[dependencies]
+cudarc = { version = "xx.xx.xx", features = ["cuda-13010"] }
+```
+
 ## Project Dependencies Details
 
 cudarc License : [https://github.com/chelsea0x3b/cudarc/blob/main/LICENSE-MIT](https://github.com/chelsea0x3b/cudarc/blob/main/LICENSE-MIT) and [another Apache-2.0 License](https://github.com/chelsea0x3b/cudarc/blob/main/LICENSE-APACHE)
