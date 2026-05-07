@@ -3,9 +3,17 @@ name = "axis_rs"
 version = "0.1.0"
 edition = "2024"
 
-crate-type = ["cdylib"]
+[lib]
+# tells Rust to build a .dll / .so / .dylib
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+# use below to avoid `axis_rs` name conflict when running `cargo build --release`
+name = "axis_rs_cli"
+path = "src/main.rs"
 
 [dependencies]
-cudarc = { version = "0.19.4", features = ["cuda-13010"] }
+libc = "0.2.186"
 rand = "0.10.1"
 rand_distr = "0.6.0"
+wgpu = "29.0.3"

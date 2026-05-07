@@ -1,0 +1,10 @@
+name = "Axis"
+uuid = "8075ab3c-eaa7-4626-8ee8-06f424f0e3e6"
+version = "0.1.0"
+authors = ["zzztzzzt <180073683+zzztzzzt@users.noreply.github.com>"]
+
+[deps]
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+
+[compat]
+Libdl = "1.11.0"
