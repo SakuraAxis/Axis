@@ -1,8 +1,8 @@
 using Axis
 
 function test_axis_phillips_ocean()
-    println("Axis Rust library: ", Axis.axis_rs_library_path())
-    println("Axis Rust library available: ", Axis.axis_rs_available())
+    println("Axis Rust library : ", Axis.axis_rs_library_path())
+    println("Axis Rust library available : ", Axis.axis_rs_available())
 
     Axis.axis_rs_available() || error("axis_rs release library was not found.")
 
@@ -10,16 +10,26 @@ function test_axis_phillips_ocean()
     value = Axis.phillips_spectrum(1.0f0, 0.2f0, windx, windy)
     zero_value = Axis.phillips_spectrum(0.0f0, 0.0f0, windx, windy)
     opposite_value = Axis.phillips_spectrum(-1.0f0, -0.2f0, windx, windy)
+    components = Axis.build_components!()
 
-    println("normalized wind: (", windx, ", ", windy, ")")
-    println("phillips_spectrum(1.0, 0.2): ", value)
-    println("phillips_spectrum(0.0, 0.0): ", zero_value)
-    println("phillips_spectrum(-1.0, -0.2): ", opposite_value)
+    println("normalized wind : (", windx, ", ", windy, ")")
+    println("phillips_spectrum(1.0, 0.2) : ", value)
+    println("phillips_spectrum(0.0, 0.0) : ", zero_value)
+    println("phillips_spectrum(-1.0, -0.2) : ", opposite_value)
+    println("first component k : (", Axis.KX[1], ", ", Axis.KY[1], ")")
+    println("first component omega : ", Axis.OMEGA[1])
+    println("first component amp : ", Axis.AMP[1])
+    println("first component phase0 : ", Axis.PHASE0[1])
 
     isfinite(value) || error("sample spectrum value is not finite.")
     value > 0.0f0 || error("sample spectrum value should be positive.")
     zero_value == 0.0f0 || error("zero wave vector should return 0.")
     opposite_value == 0.0f0 || error("opposite wind direction should return 0.")
+    all(isfinite, components.kx) || error("KX contains non-finite values.")
+    all(isfinite, components.ky) || error("KY contains non-finite values.")
+    all(isfinite, components.omega) || error("OMEGA contains non-finite values.")
+    all(isfinite, components.amp) || error("AMP contains non-finite values.")
+    all(isfinite, components.phase0) || error("PHASE0 contains non-finite values.")
 
     println("Axis Phillips ocean smoke test passed.")
     return value
