@@ -20,19 +20,6 @@ Axis uses wgpu to call GPU on Rust side for computing. wgpu licensed under the M
 
 ## How To Use
 
-### Step 1. Install CUDA Toolkit
-
-install at NVDIA Website : [https://developer.nvidia.com/cuda/toolkit](https://developer.nvidia.com/cuda/toolkit)
-
-### Step 2. Change cudarc version at "axis_rs/Cargo.toml"
-
-For example, if you use CUDA Toolkit 13.1, edit version to below
-
-```toml
-[dependencies]
-cudarc = { version = "xx.xx.xx", features = ["cuda-13010"] }
-```
-
 ## Project Dependencies Details
 
 wgpu License : [https://github.com/gfx-rs/wgpu/blob/trunk/LICENSE.MIT](https://github.com/gfx-rs/wgpu/blob/trunk/LICENSE.MIT) and [another Apache-2.0 License](https://github.com/gfx-rs/wgpu/blob/trunk/LICENSE.APACHE)
