@@ -13,6 +13,17 @@ const KY = Vector{Float32}(undef, COMPONENT_COUNT)
 const OMEGA = Vector{Float32}(undef, COMPONENT_COUNT)
 const AMP = Vector{Float32}(undef, COMPONENT_COUNT)
 const PHASE0 = Vector{Float32}(undef, COMPONENT_COUNT)
+const PHASE_BASE = Matrix{Float32}(undef, RESOLUTION * RESOLUTION, COMPONENT_COUNT)
+const FRAME_BUFFER = Vector{Float32}(undef, RESOLUTION * RESOLUTION)
+
+const GRID_X = Float32[
+    ((x - 1) / (RESOLUTION - 1) - 0.5f0) * DOMAIN_SIZE for
+    _ in 1:RESOLUTION, x in 1:RESOLUTION
+]
+const GRID_Y = Float32[
+    ((y - 1) / (RESOLUTION - 1) - 0.5f0) * DOMAIN_SIZE for
+    y in 1:RESOLUTION, _ in 1:RESOLUTION
+]
 
 """
     phillips_spectrum(kx, ky, windx, windy; wind_speed=WIND_SPEED, gravity=GRAVITY)
@@ -51,6 +62,15 @@ function _check_build_components_status(status::Cint)
     status == -2 && error("component_count must be a positive even number.")
     status == -3 && error("one or more component buffers are too small.")
     error("Rust build_components failed with status $status.")
+end
+
+function _check_compute_wave_status(status::Cint)
+    status == 0 && return nothing
+    status == -1 && error("Rust compute_wave received a null pointer.")
+    status == -2 && error("frame_count must be positive.")
+    status == -3 && error("component_count must be positive.")
+    status == -4 && error("one or more wave buffers are too small.")
+    error("Rust compute_wave failed with status $status.")
 end
 
 """
@@ -114,6 +134,83 @@ end
 
 function build_components!(; kwargs...)
     return build_components!(KX, KY, OMEGA, AMP, PHASE0; kwargs...)
+end
+
+function precompute_phase!(
+    phase_base::Matrix{Float32} = PHASE_BASE,
+    kx::Vector{Float32} = KX,
+    ky::Vector{Float32} = KY;
+    grid_x::Matrix{Float32} = GRID_X,
+    grid_y::Matrix{Float32} = GRID_Y,
+    component_count::Integer = COMPONENT_COUNT,
+)
+    frame_count = length(grid_x)
+    length(grid_y) == frame_count || error("grid_x and grid_y must have the same length.")
+    size(phase_base, 1) >= frame_count || error("phase_base has too few rows.")
+    size(phase_base, 2) >= component_count || error("phase_base has too few columns.")
+    _check_component_buffer("kx", kx, component_count)
+    _check_component_buffer("ky", ky, component_count)
+
+    @inbounds for component in 1:component_count
+        for idx in 1:frame_count
+            phase_base[idx, component] = kx[component] * grid_x[idx] + ky[component] * grid_y[idx]
+        end
+    end
+
+    return phase_base
+end
+
+function compute_wave!(
+    frame::Vector{Float32},
+    time::Real,
+    phase_base::Matrix{Float32} = PHASE_BASE,
+    omega::Vector{Float32} = OMEGA,
+    amp::Vector{Float32} = AMP,
+    phase0::Vector{Float32} = PHASE0;
+    component_count::Integer = COMPONENT_COUNT,
+)
+    frame_count = length(frame)
+    size(phase_base, 1) >= frame_count || error("phase_base has too few rows.")
+    size(phase_base, 2) >= component_count || error("phase_base has too few columns.")
+    _check_component_buffer("omega", omega, component_count)
+    _check_component_buffer("amp", amp, component_count)
+    _check_component_buffer("phase0", phase0, component_count)
+
+    status = ccall(
+        _axis_rs_symbol(:rust_compute_phillips_ocean_wave),
+        Cint,
+        (
+            Ptr{Cfloat},
+            Ptr{Cfloat},
+            Ptr{Cfloat},
+            Ptr{Cfloat},
+            Ptr{Cfloat},
+            Csize_t,
+            Csize_t,
+            Cfloat,
+        ),
+        frame,
+        phase_base,
+        omega,
+        amp,
+        phase0,
+        Csize_t(frame_count),
+        Csize_t(component_count),
+        Float32(time),
+    )
+
+    _check_compute_wave_status(status)
+    return frame
+end
+
+function compute_wave!(time::Real)
+    return compute_wave!(FRAME_BUFFER, time)
+end
+
+function init!()
+    build_components!()
+    precompute_phase!()
+    return nothing
 end
 
 function phillips_spectrum(

@@ -28,6 +28,13 @@ pub enum BuildComponentsError {
     BufferTooSmall,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputeWaveError {
+    InvalidFrameCount,
+    InvalidComponentCount,
+    BufferTooSmall,
+}
+
 struct AxisRng {
     state: u64,
 }
@@ -129,9 +136,52 @@ pub fn build_components(
     Ok(())
 }
 
+pub fn compute_wave(
+    frame: &mut [f32],
+    phase_base: &[f32],
+    omega: &[f32],
+    amp: &[f32],
+    phase0: &[f32],
+    frame_count: usize,
+    component_count: usize,
+    time: f32,
+) -> Result<(), ComputeWaveError> {
+    if frame_count == 0 {
+        return Err(ComputeWaveError::InvalidFrameCount);
+    }
+    if component_count == 0 {
+        return Err(ComputeWaveError::InvalidComponentCount);
+    }
+
+    let phase_base_len = frame_count
+        .checked_mul(component_count)
+        .ok_or(ComputeWaveError::BufferTooSmall)?;
+
+    if frame.len() < frame_count
+        || phase_base.len() < phase_base_len
+        || omega.len() < component_count
+        || amp.len() < component_count
+        || phase0.len() < component_count
+    {
+        return Err(ComputeWaveError::BufferTooSmall);
+    }
+
+    for idx in 0..frame_count {
+        let mut height = 0.0;
+        for component in 0..component_count {
+            let phase_index = idx + component * frame_count;
+            height += amp[component]
+                * (phase_base[phase_index] - omega[component] * time + phase0[component]).cos();
+        }
+        frame[idx] = height;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_components, phillips_spectrum};
+    use super::{build_components, compute_wave, phillips_spectrum};
     use std::f32::consts::TAU;
 
     #[test]
@@ -185,5 +235,20 @@ mod tests {
                 .iter()
                 .all(|value| value.is_finite() && *value >= 0.0 && *value < TAU)
         );
+    }
+
+    #[test]
+    fn computes_wave_frame_from_phase_components() {
+        let phase_base = vec![0.0, 1.0, 2.0, 3.0];
+        let omega = vec![1.0, 2.0];
+        let amp = vec![0.5, 0.25];
+        let phase0 = vec![0.0, 0.5];
+        let mut frame = vec![0.0; 2];
+
+        compute_wave(&mut frame, &phase_base, &omega, &amp, &phase0, 2, 2, 0.125).unwrap();
+
+        assert!(frame.iter().all(|value| value.is_finite()));
+        assert_ne!(frame[0], 0.0);
+        assert_ne!(frame[1], 0.0);
     }
 }

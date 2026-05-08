@@ -10,7 +10,8 @@ function test_axis_phillips_ocean()
     value = Axis.phillips_spectrum(1.0f0, 0.2f0, windx, windy)
     zero_value = Axis.phillips_spectrum(0.0f0, 0.0f0, windx, windy)
     opposite_value = Axis.phillips_spectrum(-1.0f0, -0.2f0, windx, windy)
-    components = Axis.build_components!()
+    Axis.init!()
+    frame = Axis.compute_wave!(Axis.FRAME_BUFFER, 0.0)
 
     println("normalized wind : (", windx, ", ", windy, ")")
     println("phillips_spectrum(1.0, 0.2) : ", value)
@@ -20,19 +21,21 @@ function test_axis_phillips_ocean()
     println("first component omega : ", Axis.OMEGA[1])
     println("first component amp : ", Axis.AMP[1])
     println("first component phase0 : ", Axis.PHASE0[1])
+    println("first frame height : ", Axis.FRAME_BUFFER[1])
 
     isfinite(value) || error("sample spectrum value is not finite.")
     value > 0.0f0 || error("sample spectrum value should be positive.")
     zero_value == 0.0f0 || error("zero wave vector should return 0.")
     opposite_value == 0.0f0 || error("opposite wind direction should return 0.")
-    all(isfinite, components.kx) || error("KX contains non-finite values.")
-    all(isfinite, components.ky) || error("KY contains non-finite values.")
-    all(isfinite, components.omega) || error("OMEGA contains non-finite values.")
-    all(isfinite, components.amp) || error("AMP contains non-finite values.")
-    all(isfinite, components.phase0) || error("PHASE0 contains non-finite values.")
+    all(isfinite, Axis.KX) || error("KX contains non-finite values.")
+    all(isfinite, Axis.KY) || error("KY contains non-finite values.")
+    all(isfinite, Axis.OMEGA) || error("OMEGA contains non-finite values.")
+    all(isfinite, Axis.AMP) || error("AMP contains non-finite values.")
+    all(isfinite, Axis.PHASE0) || error("PHASE0 contains non-finite values.")
+    all(isfinite, frame) || error("FRAME_BUFFER contains non-finite values.")
 
     println("Axis Phillips ocean smoke test passed.")
-    return value
+    return frame
 end
 
 test_axis_phillips_ocean()

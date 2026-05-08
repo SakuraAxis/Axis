@@ -58,3 +58,51 @@ pub unsafe extern "C" fn rust_build_phillips_ocean_components(
         Err(phillips_ocean::BuildComponentsError::BufferTooSmall) => -3,
     }
 }
+
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compute_phillips_ocean_wave(
+    frame: *mut f32,
+    phase_base: *const f32,
+    omega: *const f32,
+    amp: *const f32,
+    phase0: *const f32,
+    frame_count: usize,
+    component_count: usize,
+    time: f32,
+) -> i32 {
+    if frame.is_null()
+        || phase_base.is_null()
+        || omega.is_null()
+        || amp.is_null()
+        || phase0.is_null()
+    {
+        return -1;
+    }
+
+    let Some(phase_base_len) = frame_count.checked_mul(component_count) else {
+        return -4;
+    };
+
+    let frame = unsafe { slice::from_raw_parts_mut(frame, frame_count) };
+    let phase_base = unsafe { slice::from_raw_parts(phase_base, phase_base_len) };
+    let omega = unsafe { slice::from_raw_parts(omega, component_count) };
+    let amp = unsafe { slice::from_raw_parts(amp, component_count) };
+    let phase0 = unsafe { slice::from_raw_parts(phase0, component_count) };
+
+    match phillips_ocean::compute_wave(
+        frame,
+        phase_base,
+        omega,
+        amp,
+        phase0,
+        frame_count,
+        component_count,
+        time,
+    ) {
+        Ok(()) => 0,
+        Err(phillips_ocean::ComputeWaveError::InvalidFrameCount) => -2,
+        Err(phillips_ocean::ComputeWaveError::InvalidComponentCount) => -3,
+        Err(phillips_ocean::ComputeWaveError::BufferTooSmall) => -4,
+    }
+}
