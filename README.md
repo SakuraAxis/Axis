@@ -14,9 +14,9 @@ IMPORTANT : This project is still in the development and testing stages, licensi
 **[ for Dependencies Details please see the end of this README ]**
 
 [![Julia](https://img.shields.io/badge/Julia-9558B2?style=for-the-badge&logo=julia&logoColor=white)](https://github.com/JuliaLang/julia)
-[![cudarc](https://img.shields.io/badge/cudarc-F04D23?style=for-the-badge&logo=rust&logoColor=white)](https://github.com/chelsea0x3b/cudarc)
+[![wgpu](https://img.shields.io/badge/wgpu-F04D23?style=for-the-badge&logo=rust&logoColor=white)](https://github.com/gfx-rs/wgpu)
 
-Axis uses cudarc to call NVIDIA GPUs for parallel computing. cudarc licensed under the MIT License & Apache-2.0 License.
+Axis uses wgpu to call GPU on Rust side for computing. wgpu licensed under the MIT License & Apache-2.0 License.
 
 ## How To Use
 
@@ -35,4 +35,4 @@ cudarc = { version = "xx.xx.xx", features = ["cuda-13010"] }
 
 ## Project Dependencies Details
 
-cudarc License : [https://github.com/chelsea0x3b/cudarc/blob/main/LICENSE-MIT](https://github.com/chelsea0x3b/cudarc/blob/main/LICENSE-MIT) and [another Apache-2.0 License](https://github.com/chelsea0x3b/cudarc/blob/main/LICENSE-APACHE)
+wgpu License : [https://github.com/gfx-rs/wgpu/blob/trunk/LICENSE.MIT](https://github.com/gfx-rs/wgpu/blob/trunk/LICENSE.MIT) and [another Apache-2.0 License](https://github.com/gfx-rs/wgpu/blob/trunk/LICENSE.APACHE)
