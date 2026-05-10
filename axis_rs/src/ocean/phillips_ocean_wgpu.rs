@@ -55,6 +55,8 @@ pub enum WgpuError {
     MapFailed,
     PollFailed,
     ReadbackFailed,
+    BuffersNotUploaded,
+    FrameCountMismatch,
 }
 
 struct ThreadWaker {
@@ -86,11 +88,22 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+/// GPU resources that persist across frames.
+struct PersistentBuffers {
+    frame_buffer: wgpu::Buffer,
+    readback_buffer: wgpu::Buffer,
+    params_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    frame_count: usize,
+    component_count: usize,
+}
+
 struct WgpuBackend {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    persistent: Option<PersistentBuffers>,
 }
 
 static BACKEND: OnceLock<Mutex<Option<WgpuBackend>>> = OnceLock::new();
@@ -160,9 +173,75 @@ pub fn init() -> Result<(), WgpuError> {
         queue,
         pipeline,
         bind_group_layout,
+        persistent: None,
     });
 
     Ok(())
+}
+
+/// Upload persistent buffers to the GPU. Call once after init().
+pub fn upload_buffers(
+    phase_base: &[f32],
+    omega: &[f32],
+    amp: &[f32],
+    phase0: &[f32],
+    frame_count: usize,
+    component_count: usize,
+) -> Result<(), WgpuError> {
+    if frame_count == 0 {
+        return Err(WgpuError::InvalidFrameCount);
+    }
+    if component_count == 0 {
+        return Err(WgpuError::InvalidComponentCount);
+    }
+
+    let phase_base_len = frame_count
+        .checked_mul(component_count)
+        .ok_or(WgpuError::BufferTooSmall)?;
+
+    if phase_base.len() < phase_base_len
+        || omega.len() < component_count
+        || amp.len() < component_count
+        || phase0.len() < component_count
+    {
+        return Err(WgpuError::BufferTooSmall);
+    }
+
+    let mut slot = backend_slot()
+        .lock()
+        .map_err(|_| WgpuError::NotInitialized)?;
+    let backend = slot.as_mut().ok_or(WgpuError::NotInitialized)?;
+
+    backend.upload_buffers(
+        &phase_base[..phase_base_len],
+        &omega[..component_count],
+        &amp[..component_count],
+        &phase0[..component_count],
+        frame_count,
+        component_count,
+    );
+
+    Ok(())
+}
+
+/// Compute a wave frame. Only updates the time parameter and dispatches.
+pub fn compute_wave(
+    frame: &mut [f32],
+    frame_count: usize,
+    time: f32,
+) -> Result<(), WgpuError> {
+    if frame_count == 0 {
+        return Err(WgpuError::InvalidFrameCount);
+    }
+    if frame.len() < frame_count {
+        return Err(WgpuError::BufferTooSmall);
+    }
+
+    let slot = backend_slot()
+        .lock()
+        .map_err(|_| WgpuError::NotInitialized)?;
+    let backend = slot.as_ref().ok_or(WgpuError::NotInitialized)?;
+    backend.compute_wave(&mut frame[..frame_count], frame_count, time)
 }
 
 fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
@@ -214,66 +293,16 @@ fn component_bytes(omega: &[f32], amp: &[f32], phase0: &[f32]) -> Vec<u8> {
     bytes
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn compute_wave(
-    frame: &mut [f32],
-    phase_base: &[f32],
-    omega: &[f32],
-    amp: &[f32],
-    phase0: &[f32],
-    frame_count: usize,
-    component_count: usize,
-    time: f32,
-) -> Result<(), WgpuError> {
-    if frame_count == 0 {
-        return Err(WgpuError::InvalidFrameCount);
-    }
-    if component_count == 0 {
-        return Err(WgpuError::InvalidComponentCount);
-    }
-
-    let phase_base_len = frame_count
-        .checked_mul(component_count)
-        .ok_or(WgpuError::BufferTooSmall)?;
-
-    if frame.len() < frame_count
-        || phase_base.len() < phase_base_len
-        || omega.len() < component_count
-        || amp.len() < component_count
-        || phase0.len() < component_count
-    {
-        return Err(WgpuError::BufferTooSmall);
-    }
-
-    let slot = backend_slot()
-        .lock()
-        .map_err(|_| WgpuError::NotInitialized)?;
-    let backend = slot.as_ref().ok_or(WgpuError::NotInitialized)?;
-    backend.compute_wave(
-        frame,
-        &phase_base[..phase_base_len],
-        &omega[..component_count],
-        &amp[..component_count],
-        &phase0[..component_count],
-        frame_count,
-        component_count,
-        time,
-    )
-}
-
 impl WgpuBackend {
-    #[allow(clippy::too_many_arguments)]
-    fn compute_wave(
-        &self,
-        frame: &mut [f32],
+    fn upload_buffers(
+        &mut self,
         phase_base: &[f32],
         omega: &[f32],
         amp: &[f32],
         phase0: &[f32],
         frame_count: usize,
         component_count: usize,
-        time: f32,
-    ) -> Result<(), WgpuError> {
+    ) {
         let frame_bytes = (frame_count * std::mem::size_of::<f32>()) as wgpu::BufferAddress;
 
         let frame_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -282,17 +311,21 @@ impl WgpuBackend {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+
         let phase_base_buffer = self.create_storage_buffer("Phase Base", phase_base);
+
         let component_data = component_bytes(omega, amp, phase0);
         let components_buffer =
             self.create_bytes_storage_buffer("Phillips Ocean Components", &component_data);
+
         let params_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Axis Phillips Ocean Params Buffer"),
-                contents: &params_bytes(frame_count, component_count, time),
-                usage: wgpu::BufferUsages::UNIFORM,
+                contents: &params_bytes(frame_count, component_count, 0.0),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
+
         let readback_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Axis Phillips Ocean Readback Buffer"),
             size: frame_bytes,
@@ -311,6 +344,35 @@ impl WgpuBackend {
             ],
         });
 
+        self.persistent = Some(PersistentBuffers {
+            frame_buffer,
+            readback_buffer,
+            params_buffer,
+            bind_group,
+            frame_count,
+            component_count,
+        });
+    }
+
+    fn compute_wave(
+        &self,
+        frame: &mut [f32],
+        frame_count: usize,
+        time: f32,
+    ) -> Result<(), WgpuError> {
+        let persistent = self.persistent.as_ref().ok_or(WgpuError::BuffersNotUploaded)?;
+
+        if frame_count != persistent.frame_count {
+            return Err(WgpuError::FrameCountMismatch);
+        }
+
+        // Update only the params uniform (16 bytes) — the only thing that changes per frame
+        self.queue.write_buffer(
+            &persistent.params_buffer,
+            0,
+            &params_bytes(persistent.frame_count, persistent.component_count, time),
+        );
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -323,15 +385,22 @@ impl WgpuBackend {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, &persistent.bind_group, &[]);
             pass.dispatch_workgroups((frame_count as u32).div_ceil(WORKGROUP_SIZE), 1, 1);
         }
 
-        encoder.copy_buffer_to_buffer(&frame_buffer, 0, &readback_buffer, 0, frame_bytes);
+        encoder.copy_buffer_to_buffer(
+            &persistent.frame_buffer,
+            0,
+            &persistent.readback_buffer,
+            0,
+            (frame_count * std::mem::size_of::<f32>()) as wgpu::BufferAddress,
+        );
         self.queue.submit(Some(encoder.finish()));
 
         let (sender, receiver) = mpsc::channel();
-        readback_buffer
+        persistent
+            .readback_buffer
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.send(result);
@@ -347,12 +416,12 @@ impl WgpuBackend {
             .map_err(|_| WgpuError::MapFailed)?;
 
         {
-            let view = readback_buffer.slice(..).get_mapped_range();
+            let view = persistent.readback_buffer.slice(..).get_mapped_range();
             for (target, bytes) in frame.iter_mut().zip(view.chunks_exact(4)) {
                 *target = f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             }
         }
-        readback_buffer.unmap();
+        persistent.readback_buffer.unmap();
 
         Ok(())
     }

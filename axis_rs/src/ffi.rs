@@ -70,24 +70,16 @@ pub extern "C" fn rust_init_phillips_ocean_wgpu() -> i32 {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_compute_phillips_ocean_wave(
-    frame: *mut f32,
+pub unsafe extern "C" fn rust_upload_phillips_ocean_buffers(
     phase_base: *const f32,
     omega: *const f32,
     amp: *const f32,
     phase0: *const f32,
     frame_count: usize,
     component_count: usize,
-    time: f32,
 ) -> i32 {
-    if frame.is_null()
-        || phase_base.is_null()
-        || omega.is_null()
-        || amp.is_null()
-        || phase0.is_null()
-    {
+    if phase_base.is_null() || omega.is_null() || amp.is_null() || phase0.is_null() {
         return -1;
     }
 
@@ -95,37 +87,60 @@ pub unsafe extern "C" fn rust_compute_phillips_ocean_wave(
         return -4;
     };
 
-    let frame = unsafe { slice::from_raw_parts_mut(frame, frame_count) };
     let phase_base = unsafe { slice::from_raw_parts(phase_base, phase_base_len) };
     let omega = unsafe { slice::from_raw_parts(omega, component_count) };
     let amp = unsafe { slice::from_raw_parts(amp, component_count) };
     let phase0 = unsafe { slice::from_raw_parts(phase0, component_count) };
 
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        phillips_ocean_wgpu::compute_wave(
-            frame,
+        phillips_ocean_wgpu::upload_buffers(
             phase_base,
             omega,
             amp,
             phase0,
             frame_count,
             component_count,
-            time,
         )
     }));
 
     match result {
         Ok(Ok(())) => 0,
         Ok(Err(phillips_ocean_wgpu::WgpuError::NotInitialized)) => -10,
-        Ok(Err(phillips_ocean_wgpu::WgpuError::NoAdapter)) => -11,
-        Ok(Err(phillips_ocean_wgpu::WgpuError::RequestDeviceFailed)) => -12,
         Ok(Err(phillips_ocean_wgpu::WgpuError::InvalidFrameCount)) => -2,
         Ok(Err(phillips_ocean_wgpu::WgpuError::InvalidComponentCount)) => -3,
+        Ok(Err(phillips_ocean_wgpu::WgpuError::BufferTooSmall)) => -4,
+        Ok(Err(_)) => -13,
+        Err(_) => -17,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_compute_phillips_ocean_wave(
+    frame: *mut f32,
+    frame_count: usize,
+    time: f32,
+) -> i32 {
+    if frame.is_null() {
+        return -1;
+    }
+
+    let frame = unsafe { slice::from_raw_parts_mut(frame, frame_count) };
+
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        phillips_ocean_wgpu::compute_wave(frame, frame_count, time)
+    }));
+
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(phillips_ocean_wgpu::WgpuError::NotInitialized)) => -10,
+        Ok(Err(phillips_ocean_wgpu::WgpuError::BuffersNotUploaded)) => -18,
+        Ok(Err(phillips_ocean_wgpu::WgpuError::FrameCountMismatch)) => -19,
+        Ok(Err(phillips_ocean_wgpu::WgpuError::InvalidFrameCount)) => -2,
         Ok(Err(phillips_ocean_wgpu::WgpuError::BufferTooSmall)) => -4,
         Ok(Err(phillips_ocean_wgpu::WgpuError::MapFailed)) => -14,
         Ok(Err(phillips_ocean_wgpu::WgpuError::PollFailed)) => -15,
         Ok(Err(phillips_ocean_wgpu::WgpuError::ReadbackFailed)) => -16,
-        Ok(Err(phillips_ocean_wgpu::WgpuError::AlreadyInitialized)) => -13,
+        Ok(Err(_)) => -13,
         Err(_) => -17,
     }
 }

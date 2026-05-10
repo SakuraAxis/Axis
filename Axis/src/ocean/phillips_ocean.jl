@@ -68,16 +68,14 @@ function _check_compute_wave_status(status::Cint)
     status == 0 && return nothing
     status == -1 && error("Rust compute_wave received a null pointer.")
     status == -2 && error("frame_count must be positive.")
-    status == -3 && error("component_count must be positive.")
-    status == -4 && error("one or more wave buffers are too small.")
+    status == -4 && error("frame buffer is too small.")
     status == -10 && error("Phillips ocean wgpu backend is not initialized. Call init!() first.")
-    status == -11 && error("Phillips ocean wgpu backend could not find a compatible GPU adapter.")
-    status == -12 && error("Phillips ocean wgpu backend failed to create a GPU device.")
-    status == -13 && error("Phillips ocean wgpu backend failed to initialize.")
     status == -14 && error("Phillips ocean wgpu readback mapping failed.")
     status == -15 && error("Phillips ocean wgpu device polling failed.")
     status == -16 && error("Phillips ocean wgpu readback failed.")
     status == -17 && error("Phillips ocean wgpu backend panicked during compute.")
+    status == -18 && error("Phillips ocean wgpu buffers not uploaded. Call upload_buffers!() first.")
+    status == -19 && error("Phillips ocean frame_count mismatch with uploaded buffers.")
     error("Rust compute_wave failed with status $status.")
 end
 
@@ -88,6 +86,17 @@ function _check_wgpu_init_status(status::Cint)
     status == -13 && error("Phillips ocean wgpu backend failed to initialize.")
     status == -17 && error("Phillips ocean wgpu backend panicked during initialization.")
     error("Phillips ocean wgpu backend failed with status $status.")
+end
+
+function _check_upload_status(status::Cint)
+    status == 0 && return nothing
+    status == -1 && error("Rust upload_buffers received a null pointer.")
+    status == -2 && error("frame_count must be positive.")
+    status == -3 && error("component_count must be positive.")
+    status == -4 && error("one or more upload buffers are too small.")
+    status == -10 && error("Phillips ocean wgpu backend is not initialized. Call init!() first.")
+    status == -17 && error("Phillips ocean wgpu backend panicked during upload.")
+    error("Rust upload_buffers failed with status $status.")
 end
 
 """
@@ -177,16 +186,20 @@ function precompute_phase!(
     return phase_base
 end
 
-function compute_wave!(
-    frame::Vector{Float32},
-    time::Real,
+"""
+    upload_buffers!(phase_base, omega, amp, phase0; frame_count, component_count)
+
+Upload persistent ocean data to the GPU. Call once after init!().
+Subsequent calls to compute_wave!() will use these buffers.
+"""
+function upload_buffers!(
     phase_base::Matrix{Float32} = PHASE_BASE,
     omega::Vector{Float32} = OMEGA,
     amp::Vector{Float32} = AMP,
     phase0::Vector{Float32} = PHASE0;
+    frame_count::Integer = size(phase_base, 1),
     component_count::Integer = COMPONENT_COUNT,
 )
-    frame_count = length(frame)
     size(phase_base, 1) >= frame_count || error("phase_base has too few rows.")
     size(phase_base, 2) >= component_count || error("phase_base has too few columns.")
     _check_component_buffer("omega", omega, component_count)
@@ -194,25 +207,39 @@ function compute_wave!(
     _check_component_buffer("phase0", phase0, component_count)
 
     status = ccall(
-        _axis_rs_symbol(:rust_compute_phillips_ocean_wave),
+        _axis_rs_symbol(:rust_upload_phillips_ocean_buffers),
         Cint,
-        (
-            Ptr{Cfloat},
-            Ptr{Cfloat},
-            Ptr{Cfloat},
-            Ptr{Cfloat},
-            Ptr{Cfloat},
-            Csize_t,
-            Csize_t,
-            Cfloat,
-        ),
-        frame,
+        (Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Csize_t, Csize_t),
         phase_base,
         omega,
         amp,
         phase0,
         Csize_t(frame_count),
         Csize_t(component_count),
+    )
+
+    _check_upload_status(status)
+    return nothing
+end
+
+"""
+    compute_wave!(frame, time)
+
+Compute a wave frame using previously uploaded GPU buffers.
+Only the `time` parameter is updated per call — no data re-upload.
+"""
+function compute_wave!(
+    frame::Vector{Float32},
+    time::Real,
+)
+    frame_count = length(frame)
+
+    status = ccall(
+        _axis_rs_symbol(:rust_compute_phillips_ocean_wave),
+        Cint,
+        (Ptr{Cfloat}, Csize_t, Cfloat),
+        frame,
+        Csize_t(frame_count),
         Float32(time),
     )
 
@@ -229,6 +256,7 @@ function init!()
     precompute_phase!()
     status = ccall(_axis_rs_symbol(:rust_init_phillips_ocean_wgpu), Cint, ())
     _check_wgpu_init_status(status)
+    upload_buffers!()
     return nothing
 end
 
