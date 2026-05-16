@@ -1,279 +1,389 @@
-const RESOLUTION = 96
-const FRAME_INTERVAL = 1 / 30
-const DOMAIN_SIZE = 36.0f0
-const COMPONENT_COUNT = 128
+#= 
+OceanSim struct-based implementation
 
-const GRAVITY = 9.81f0
-const WIND_SPEED = 14.0f0
-const WIND_DIRECTION = (0.92f0, 0.38f0)
-const AMPLITUDE_SCALE = 0.08f0
+Each OceanSim instance owns its own CPU buffers and GPU resource IDs,
+allowing multiple independent simulations to run simultaneously.
 
-const KX = Vector{Float32}(undef, COMPONENT_COUNT)
-const KY = Vector{Float32}(undef, COMPONENT_COUNT)
-const OMEGA = Vector{Float32}(undef, COMPONENT_COUNT)
-const AMP = Vector{Float32}(undef, COMPONENT_COUNT)
-const PHASE0 = Vector{Float32}(undef, COMPONENT_COUNT)
-const PHASE_BASE = Matrix{Float32}(undef, RESOLUTION * RESOLUTION, COMPONENT_COUNT)
-const FRAME_BUFFER = Vector{Float32}(undef, RESOLUTION * RESOLUTION)
+Public API :
+- create_sim(; resolution, component_count, ...) -> OceanSim
+- init!(sim)
+- compute_wave!(sim, t) / compute_wave!(sim, output, t)
+- destroy!(sim)
+- phillips_spectrum(kx, ky, windx, windy)
+=#
 
-const GRID_X = Float32[
-    ((x - 1) / (RESOLUTION - 1) - 0.5f0) * DOMAIN_SIZE for
-    _ in 1:RESOLUTION, x in 1:RESOLUTION
-]
-const GRID_Y = Float32[
-    ((y - 1) / (RESOLUTION - 1) - 0.5f0) * DOMAIN_SIZE for
-    y in 1:RESOLUTION, _ in 1:RESOLUTION
-]
+#= 
+Unique GPU resource ID allocation ( thread- safe monotonic counter )
+Buffers and Pipelines live in separate HashMaps in Rust, so IDs can overlap.
+Convention : sim N gets buffer IDs ( 4N-3 )..( 4N ) and pipeline ID N.
+=#
+const _SIM_COUNTER = Ref{Int}(0)
+
+function _alloc_sim_resources()
+    id = (_SIM_COUNTER[] += 1)
+    base = id * 4
+    return (
+        buf_frame      = base - 3,
+        buf_phase_base = base - 2,
+        buf_components = base - 1,
+        buf_params     = base,
+        pipeline_id    = id,
+    )
+end
+
+#= 
+PhillipsSim - holds all state for one independent ocean simulation
+=#
+mutable struct PhillipsSim <: AbstractOceanSim
+    # Physics parameters
+    resolution::Int
+    component_count::Int
+    domain_size::Float32
+    gravity::Float32
+    wind_speed::Float32
+    wind_direction::NTuple{2, Float32}
+    amplitude_scale::Float32
+    frame_interval::Float32
+    seed::UInt64
+
+    # Pre-allocated CPU buffers ( zero GC in the hot path )
+    kx::Vector{Float32}
+    ky::Vector{Float32}
+    omega::Vector{Float32}
+    amp::Vector{Float32}
+    phase0::Vector{Float32}
+    phase_base::Matrix{Float32}
+    frame_buffer::Vector{Float32}
+    grid_x::Matrix{Float32}
+    grid_y::Matrix{Float32}
+
+    # Reusable params scratch buffer ( avoids 16-byte alloc every frame )
+    _params_buf::Vector{UInt8}
+
+    # GPU resource IDs ( unique per instance, keys into Rust's HashMaps )
+    _buf_frame::Int
+    _buf_phase_base::Int
+    _buf_components::Int
+    _buf_params::Int
+    _pipeline_id::Int
+
+    # Lifecycle state
+    _gpu_ready::Bool
+end
+
+#= 
+Constructor
+=#
+"""
+    create_phillips_sim(; resolution, component_count, domain_size, gravity,
+                          wind_speed, wind_direction, amplitude_scale,
+                          frame_interval, seed) -> PhillipsSim
+
+Allocate a new Phillips ocean simulation. CPU buffers are pre-allocated here;
+GPU resources are created lazily during `init!(sim)`.
+"""
+function create_phillips_sim(;
+    resolution::Int                         = 96,
+    component_count::Int                    = 128,
+    domain_size::Real                       = 36.0,
+    gravity::Real                           = 9.81,
+    wind_speed::Real                        = 14.0,
+    wind_direction::Tuple{<:Real, <:Real}   = (0.92, 0.38),
+    amplitude_scale::Real                   = 0.08,
+    frame_interval::Real                    = 1 / 30,
+    seed::Integer                           = 42,
+)
+    ids = _alloc_sim_resources()
+    ds  = Float32(domain_size)
+    n   = resolution
+
+    grid_x = Float32[((x - 1) / (n - 1) - 0.5f0) * ds for _ in 1:n, x in 1:n]
+    grid_y = Float32[((y - 1) / (n - 1) - 0.5f0) * ds for y in 1:n, _ in 1:n]
+
+    return PhillipsSim(
+        resolution, component_count,
+        ds, Float32(gravity), Float32(wind_speed),
+        (Float32(wind_direction[1]), Float32(wind_direction[2])),
+        Float32(amplitude_scale), Float32(frame_interval), UInt64(seed),
+        Vector{Float32}(undef, component_count), # kx
+        Vector{Float32}(undef, component_count), # ky
+        Vector{Float32}(undef, component_count), # omega
+        Vector{Float32}(undef, component_count), # amp
+        Vector{Float32}(undef, component_count), # phase0
+        Matrix{Float32}(undef, n * n, component_count), # phase_base
+        Vector{Float32}(undef, n * n), # frame_buffer
+        grid_x, grid_y,
+        Vector{UInt8}(undef, 16), # _params_buf
+        ids.buf_frame, ids.buf_phase_base, ids.buf_components, ids.buf_params,
+        ids.pipeline_id,
+        false,
+    )
+end
+
+#= 
+WGSL compute shader ( Phillips Ocean kernel )
+=#
+const _OCEAN_WGSL = """
+struct Params {
+    frame_count     : u32,
+    component_count : u32,
+    time            : f32,
+    _pad            : f32,
+}
+
+@group(0) @binding(0) var<storage, read_write> frame      : array<f32>;
+@group(0) @binding(1) var<storage, read>       phase_base : array<f32>;
+@group(0) @binding(2) var<storage, read>       components : array<vec4<f32>>;
+@group(0) @binding(3) var<uniform>             params     : Params;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= params.frame_count) { return; }
+
+    var height = 0.0;
+    for (var c = 0u; c < params.component_count; c = c + 1u) {
+        let data = components[c];
+        height   = height + data.y *
+            cos(phase_base[idx + c * params.frame_count] - data.x * params.time + data.z);
+    }
+    frame[idx] = height;
+}
+"""
+
+const _WORKGROUP_SIZE = 256
+
+#= 
+CPU math helpers
+=#
 
 """
-    phillips_spectrum(kx, ky, windx, windy; wind_speed=WIND_SPEED, gravity=GRAVITY)
+    phillips_spectrum(kx, ky, windx, windy; wind_speed, gravity) -> Float32
 
-Compute the Phillips ocean spectrum through the Rust implementation.
+Pure-Julia Phillips ocean spectrum — no FFI, no allocation.
 """
 function phillips_spectrum(
-    kx::Float32,
-    ky::Float32,
-    windx::Float32,
-    windy::Float32;
-    wind_speed::Float32 = WIND_SPEED,
-    gravity::Float32 = GRAVITY,
-)
-    return ccall(
-        _axis_rs_symbol(:rust_phillips_spectrum),
-        Cfloat,
-        (Cfloat, Cfloat, Cfloat, Cfloat, Cfloat, Cfloat),
-        kx,
-        ky,
-        windx,
-        windy,
-        wind_speed,
-        gravity,
-    )
+    kx::Float32, ky::Float32, windx::Float32, windy::Float32;
+    wind_speed::Float32 = 14.0f0,
+    gravity::Float32    = 9.81f0,
+)::Float32
+    k2 = kx * kx + ky * ky
+    k2 < 1f-6 && return 0f0
+    k         = sqrt(k2)
+    alignment = max((kx / k) * windx + (ky / k) * windy, 0f0)
+    L         = (wind_speed * wind_speed) / gravity
+    l2_small  = (L * 0.0015f0)^2
+    exp(-1f0 / (k2 * L * L)) / (k2 * k2) * alignment^4 * exp(-k2 * l2_small)
 end
 
-function _check_component_buffer(name::String, data::Vector{Float32}, component_count::Integer)
-    length(data) >= component_count && return nothing
-    error("$name length must be at least $component_count, got $(length(data)).")
+phillips_spectrum(kx::Real, ky::Real, windx::Real, windy::Real; kwargs...) =
+    phillips_spectrum(Float32(kx), Float32(ky), Float32(windx), Float32(windy); kwargs...)
+
+#= 
+Minimal xorshift64 RNG ( matches Rust AxisRng for identical numeric output )
+=#
+mutable struct _AxisRng; state::UInt64; end
+_AxisRng(seed::Integer) = _AxisRng(UInt64(max(seed, 1)))
+
+function _next_u32!(r::_AxisRng)::UInt32
+    x = r.state
+    x ⊻= x >> 12; x ⊻= x << 25; x ⊻= x >> 27
+    r.state = x
+    UInt32((x * 0x2545f4914f6cdd1d % typemax(UInt64)) >> 32)
 end
 
-function _check_build_components_status(status::Cint)
-    status == 0 && return nothing
-    status == -1 && error("Rust build_components received a null pointer.")
-    status == -2 && error("component_count must be a positive even number.")
-    status == -3 && error("one or more component buffers are too small.")
-    error("Rust build_components failed with status $status.")
+_next_f32!(r::_AxisRng)::Float32 =
+    Float32(_next_u32!(r) >> 8) * (1f0 / Float32(1 << 24))
+
+function _std_normal!(r::_AxisRng)::Float32
+    u1 = max(_next_f32!(r), floatmin(Float32))
+    sqrt(-2f0 * log(u1)) * cos(2f0 * Float32(π) * _next_f32!(r))
 end
 
-function _check_compute_wave_status(status::Cint)
-    status == 0 && return nothing
-    status == -1 && error("Rust compute_wave received a null pointer.")
-    status == -2 && error("frame_count must be positive.")
-    status == -4 && error("frame buffer is too small.")
-    status == -10 && error("Phillips ocean wgpu backend is not initialized. Call init!() first.")
-    status == -14 && error("Phillips ocean wgpu readback mapping failed.")
-    status == -15 && error("Phillips ocean wgpu device polling failed.")
-    status == -16 && error("Phillips ocean wgpu readback failed.")
-    status == -17 && error("Phillips ocean wgpu backend panicked during compute.")
-    status == -18 && error("Phillips ocean wgpu buffers not uploaded. Call upload_buffers!() first.")
-    status == -19 && error("Phillips ocean frame_count mismatch with uploaded buffers.")
-    error("Rust compute_wave failed with status $status.")
-end
-
-function _check_wgpu_init_status(status::Cint)
-    status == 0 && return nothing
-    status == -11 && error("Phillips ocean wgpu backend could not find a compatible GPU adapter.")
-    status == -12 && error("Phillips ocean wgpu backend failed to create a GPU device.")
-    status == -13 && error("Phillips ocean wgpu backend failed to initialize.")
-    status == -17 && error("Phillips ocean wgpu backend panicked during initialization.")
-    error("Phillips ocean wgpu backend failed with status $status.")
-end
-
-function _check_upload_status(status::Cint)
-    status == 0 && return nothing
-    status == -1 && error("Rust upload_buffers received a null pointer.")
-    status == -2 && error("frame_count must be positive.")
-    status == -3 && error("component_count must be positive.")
-    status == -4 && error("one or more upload buffers are too small.")
-    status == -10 && error("Phillips ocean wgpu backend is not initialized. Call init!() first.")
-    status == -17 && error("Phillips ocean wgpu backend panicked during upload.")
-    error("Rust upload_buffers failed with status $status.")
-end
+#= 
+Component construction
+=#
 
 """
-    build_components!(kx, ky, omega, amp, phase0; ...)
+    build_components!(sim)
 
-Fill Phillips ocean component buffers through the Rust implementation.
+Fill `sim`'s SoA wave-component buffers (kx, ky, omega, amp, phase0).
+Pure Julia - zero allocation ( all output arrays are pre-allocated on the sim ).
 """
-function build_components!(
-    kx::Vector{Float32},
-    ky::Vector{Float32},
-    omega::Vector{Float32},
-    amp::Vector{Float32},
-    phase0::Vector{Float32};
-    component_count::Integer = COMPONENT_COUNT,
-    wind_direction::Tuple{<:Real, <:Real} = WIND_DIRECTION,
-    wind_speed::Real = WIND_SPEED,
-    gravity::Real = GRAVITY,
-    amplitude_scale::Real = AMPLITUDE_SCALE,
-    seed::Integer = 42,
-)
-    _check_component_buffer("kx", kx, component_count)
-    _check_component_buffer("ky", ky, component_count)
-    _check_component_buffer("omega", omega, component_count)
-    _check_component_buffer("amp", amp, component_count)
-    _check_component_buffer("phase0", phase0, component_count)
+function build_components!(sim::PhillipsSim)
+    cc   = sim.component_count
+    rng  = _AxisRng(sim.seed)
+    wxn, wyn = normalize2(sim.wind_direction[1], sim.wind_direction[2])
+    base_angle = atan(wyn, wxn)
+    pair_count = cc ÷ 2
+    idx = 1
 
-    status = ccall(
-        _axis_rs_symbol(:rust_build_phillips_ocean_components),
-        Cint,
-        (
-            Ptr{Cfloat},
-            Ptr{Cfloat},
-            Ptr{Cfloat},
-            Ptr{Cfloat},
-            Ptr{Cfloat},
-            Csize_t,
-            Cfloat,
-            Cfloat,
-            Cfloat,
-            Cfloat,
-            Cfloat,
-            UInt64,
-        ),
-        kx,
-        ky,
-        omega,
-        amp,
-        phase0,
-        Csize_t(component_count),
-        Float32(wind_direction[1]),
-        Float32(wind_direction[2]),
-        Float32(wind_speed),
-        Float32(gravity),
-        Float32(amplitude_scale),
-        UInt64(seed),
-    )
+    @inbounds for i in 0:(pair_count - 1)
+        band  = pair_count <= 1 ? 0f0 : Float32(i) / Float32(pair_count - 1)
+        k     = 2f0 * Float32(π) / (1.2f0 + 9.0f0 * band^2)
+        angle = base_angle + _std_normal!(rng) * 1.05f0 * (0.2f0 + 0.8f0 * band)
 
-    _check_build_components_status(status)
-    return (kx = kx, ky = ky, omega = omega, amp = amp, phase0 = phase0)
-end
-
-function build_components!(; kwargs...)
-    return build_components!(KX, KY, OMEGA, AMP, PHASE0; kwargs...)
-end
-
-function precompute_phase!(
-    phase_base::Matrix{Float32} = PHASE_BASE,
-    kx::Vector{Float32} = KX,
-    ky::Vector{Float32} = KY;
-    grid_x::Matrix{Float32} = GRID_X,
-    grid_y::Matrix{Float32} = GRID_Y,
-    component_count::Integer = COMPONENT_COUNT,
-)
-    frame_count = length(grid_x)
-    length(grid_y) == frame_count || error("grid_x and grid_y must have the same length.")
-    size(phase_base, 1) >= frame_count || error("phase_base has too few rows.")
-    size(phase_base, 2) >= component_count || error("phase_base has too few columns.")
-    _check_component_buffer("kx", kx, component_count)
-    _check_component_buffer("ky", ky, component_count)
-
-    @inbounds for component in 1:component_count
-        for idx in 1:frame_count
-            phase_base[idx, component] = kx[component] * grid_x[idx] + ky[component] * grid_y[idx]
+        for (dir, scale) in ((1f0, 1f0), (-1f0, 0.45f0))
+            wkx = dir * cos(angle) * k
+            wky = dir * sin(angle) * k
+            spec = phillips_spectrum(wkx, wky, wxn, wyn;
+                                     wind_speed = sim.wind_speed,
+                                     gravity    = sim.gravity)
+            sim.amp[idx]    = sim.amplitude_scale * scale *
+                              sqrt(max(spec, 0f0)) * (0.35f0 + 0.65f0 * (1f0 - band))
+            sim.phase0[idx] = _next_f32!(rng) * 2f0 * Float32(π)
+            sim.omega[idx]  = sqrt(sim.gravity * k)
+            sim.kx[idx]     = wkx
+            sim.ky[idx]     = wky
+            idx += 1
         end
     end
-
-    return phase_base
+    return sim
 end
 
 """
-    upload_buffers!(phase_base, omega, amp, phase0; frame_count, component_count)
+    precompute_phase!(sim)
 
-Upload persistent ocean data to the GPU. Call once after init!().
-Subsequent calls to compute_wave!() will use these buffers.
+Fill `sim.phase_base` with `kx·x + ky·y` for every grid point and component.
 """
-function upload_buffers!(
-    phase_base::Matrix{Float32} = PHASE_BASE,
-    omega::Vector{Float32} = OMEGA,
-    amp::Vector{Float32} = AMP,
-    phase0::Vector{Float32} = PHASE0;
-    frame_count::Integer = size(phase_base, 1),
-    component_count::Integer = COMPONENT_COUNT,
-)
-    size(phase_base, 1) >= frame_count || error("phase_base has too few rows.")
-    size(phase_base, 2) >= component_count || error("phase_base has too few columns.")
-    _check_component_buffer("omega", omega, component_count)
-    _check_component_buffer("amp", amp, component_count)
-    _check_component_buffer("phase0", phase0, component_count)
+function precompute_phase!(sim::PhillipsSim)
+    fc  = length(sim.grid_x)
+    cc  = sim.component_count
+    @inbounds for c in 1:cc
+        kxc = sim.kx[c]; kyc = sim.ky[c]
+        for i in 1:fc
+            sim.phase_base[i, c] = kxc * sim.grid_x[i] + kyc * sim.grid_y[i]
+        end
+    end
+    return sim
+end
 
-    status = ccall(
-        _axis_rs_symbol(:rust_upload_phillips_ocean_buffers),
-        Cint,
-        (Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Ptr{Cfloat}, Csize_t, Csize_t),
-        phase_base,
-        omega,
-        amp,
-        phase0,
-        Csize_t(frame_count),
-        Csize_t(component_count),
-    )
+#= 
+GPU buffer packing helpers
+=#
+function _pack_components!(sim::PhillipsSim)
+    cc   = sim.component_count
+    data = Vector{Float32}(undef, cc * 4)
+    @inbounds for i in 1:cc
+        b = (i - 1) * 4 + 1
+        data[b]     = sim.omega[i]
+        data[b + 1] = sim.amp[i]
+        data[b + 2] = sim.phase0[i]
+        data[b + 3] = 0f0
+    end
+    return data
+end
 
-    _check_upload_status(status)
+function _write_params!(sim::PhillipsSim, frame_count::Int, t::Float32)
+    buf = sim._params_buf        # reuse pre-allocated 16-byte scratch — no alloc
+    buf[1:4]   .= reinterpret(UInt8, [UInt32(frame_count)])
+    buf[5:8]   .= reinterpret(UInt8, [UInt32(sim.component_count)])
+    buf[9:12]  .= reinterpret(UInt8, [t])
+    buf[13:16] .= reinterpret(UInt8, [0f0])
+    return buf
+end
+
+#= 
+GPU upload
+=#
+"""
+    upload_buffers!(sim)
+
+Create GPU buffers, compile the WGSL shader, and bind everything.
+Called automatically by `init!(sim)`.
+"""
+function upload_buffers!(sim::PhillipsSim)
+    fc  = length(sim.frame_buffer)
+    cc  = sim.component_count
+
+    wgpu_create_buffer!(sim._buf_frame,      fc * 4,        BINDING_STORAGE_READ_WRITE)
+    wgpu_create_buffer!(sim._buf_phase_base, fc * cc * 4,   BINDING_STORAGE_READ)
+    wgpu_create_buffer!(sim._buf_components, cc * 4 * 4,    BINDING_STORAGE_READ)
+    wgpu_create_buffer!(sim._buf_params,     16,            BINDING_UNIFORM)
+
+    wgpu_write_buffer!(sim._buf_phase_base, sim.phase_base)
+    wgpu_write_buffer!(sim._buf_components, _pack_components!(sim))
+    wgpu_write_buffer!(sim._buf_params,     _write_params!(sim, fc, 0f0))
+
+    binding_flags = UInt32[
+        BINDING_STORAGE_READ_WRITE,
+        BINDING_STORAGE_READ,
+        BINDING_STORAGE_READ,
+        BINDING_UNIFORM,
+    ]
+    wgpu_create_compute_pipeline!(sim._pipeline_id, _OCEAN_WGSL, "main", binding_flags)
+    wgpu_bind_buffers!(sim._pipeline_id,
+        [sim._buf_frame, sim._buf_phase_base, sim._buf_components, sim._buf_params])
+
+    sim._gpu_ready = true
+    return sim
+end
+
+#= 
+Full init
+=#
+"""
+    init!(sim)
+
+Run the full initialisation sequence:
+  1. Start WGPU dispatcher ( idempotent )
+  2. Build wave components ( CPU )
+  3. Pre-compute phase grid ( CPU )
+  4. Upload buffers and compile WGSL shader ( GPU )
+"""
+function init!(sim::PhillipsSim)
+    wgpu_init!()
+    build_components!(sim)
+    precompute_phase!(sim)
+    upload_buffers!(sim)
+    @info "PhillipsOcean Initialized" backend="wgpu ( Axis )"
+    return sim
+end
+
+#= 
+Per-frame compute
+=#
+"""
+    compute_wave!(sim, output, t)
+
+Dispatch the GPU ocean kernel for time `t`, readback directly into `output`.
+No heap allocation in the hot path.
+"""
+function compute_wave!(sim::PhillipsSim, output::Vector{Float32}, t::Real)
+    sim._gpu_ready || error("OceanSim not initialized — call init!(sim) first.")
+    fc = length(output)
+
+    wgpu_write_buffer!(sim._buf_params, _write_params!(sim, fc, Float32(t)))
+    wgpu_dispatch!(sim._pipeline_id; wg_x = cld(fc, _WORKGROUP_SIZE))
+    wgpu_read_buffer!(sim._buf_frame, output)
+
+    return output
+end
+
+"""
+    compute_wave!(sim, t)
+
+Convenience overload — writes into `sim.frame_buffer`.
+"""
+compute_wave!(sim::PhillipsSim, t::Real) = compute_wave!(sim, sim.frame_buffer, t)
+
+#= 
+Cleanup
+=#
+
+"""
+    destroy!(sim)
+
+Free all GPU resources associated with this simulation.
+The `sim` object must not be used after calling this.
+"""
+function destroy!(sim::PhillipsSim)
+    sim._gpu_ready || return
+    wgpu_destroy_pipeline!(sim._pipeline_id)
+    wgpu_destroy_buffer!(sim._buf_frame)
+    wgpu_destroy_buffer!(sim._buf_phase_base)
+    wgpu_destroy_buffer!(sim._buf_components)
+    wgpu_destroy_buffer!(sim._buf_params)
+    sim._gpu_ready = false
     return nothing
-end
-
-"""
-    compute_wave!(frame, time)
-
-Compute a wave frame using previously uploaded GPU buffers.
-Only the `time` parameter is updated per call — no data re-upload.
-"""
-function compute_wave!(
-    frame::Vector{Float32},
-    time::Real,
-)
-    frame_count = length(frame)
-
-    status = ccall(
-        _axis_rs_symbol(:rust_compute_phillips_ocean_wave),
-        Cint,
-        (Ptr{Cfloat}, Csize_t, Cfloat),
-        frame,
-        Csize_t(frame_count),
-        Float32(time),
-    )
-
-    _check_compute_wave_status(status)
-    return frame
-end
-
-function compute_wave!(time::Real)
-    return compute_wave!(FRAME_BUFFER, time)
-end
-
-function init!()
-    build_components!()
-    precompute_phase!()
-    status = ccall(_axis_rs_symbol(:rust_init_phillips_ocean_wgpu), Cint, ())
-    _check_wgpu_init_status(status)
-    upload_buffers!()
-    return nothing
-end
-
-function phillips_spectrum(
-    kx::Real,
-    ky::Real,
-    windx::Real,
-    windy::Real;
-    wind_speed::Real = WIND_SPEED,
-    gravity::Real = GRAVITY,
-)
-    return phillips_spectrum(
-        Float32(kx),
-        Float32(ky),
-        Float32(windx),
-        Float32(windy);
-        wind_speed = Float32(wind_speed),
-        gravity = Float32(gravity),
-    )
 end
