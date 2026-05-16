@@ -1,20 +1,28 @@
-fn main() {
+use wgpu::Backends;
+
+#[tokio::main]
+async fn main() {
     println!("||||||  Axis GPU Diagnostics  ||||||");
 
     let instance = wgpu::Instance::default();
-    let adapters = instance.enumerate_adapters(wgpu::Backends::all());
+    let adapters = instance.enumerate_adapters(Backends::all()).await;
 
     if adapters.is_empty() {
-        println!("No WebGPU adapters found.");
+        println!("No compatible GPU adapters found.");
         return;
     }
+
+    println!("Found {} adapter(s):\n", adapters.len());
 
     for (i, adapter) in adapters.iter().enumerate() {
         let info = adapter.get_info();
         println!("[Adapter {}]", i);
-        println!("  Name: {}", info.name);
-        println!("  Backend: {:?}", info.backend);
-        println!("  Driver: {}", info.driver);
+        println!("  Name:      {}", info.name);
+        println!("  Backend:   {:?}", info.backend);
+        println!("  Device:    {:?}", info.device_type);
+        println!("  Driver:    {}", info.driver);
         println!();
     }
+
+    println!("Diagnostics complete.");
 }
