@@ -5,7 +5,9 @@
 
 <br>
 
-### Axis - 3D Physics Simulation FFI For Web / Unity. - Julia / Rust / C#.
+<img src="https://github.com/zzztzzzt/Fomalhaut.jl/blob/main/logo/logo.png" alt="axis-logo" style="height: 280px; width: auto;" />
+
+### Axis - Lightweight Julia-Rust FFI bridge + WGPU compute dispatcher.
 
 IMPORTANT : This project is still in the development and testing stages, licensing terms may be updated in the future. Please don't do any commercial usage currently.
 
