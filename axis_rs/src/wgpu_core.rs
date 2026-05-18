@@ -15,6 +15,16 @@ pub const BINDING_STORAGE_READ_WRITE: u32 = 1;
 /// Uniform buffer (flag = 2)
 pub const BINDING_UNIFORM: u32 = 2;
 
+// Fomalhaut broadcast callback type
+type WsBroadcastFn = unsafe extern "C" fn(
+    path_ptr: *const u8,
+    path_len: usize,
+    frame_ptr: *const u8,
+    frame_len: usize,
+) -> i32;
+
+static BROADCAST_CALLBACK: std::sync::Mutex<Option<WsBroadcastFn>> = std::sync::Mutex::new(None);
+
 // Error codes exposed through the C-ABI ( negative i32 )
 pub const OK: i32 = 0;
 pub const ERR_NULL_PTR: i32 = -1;
@@ -284,6 +294,273 @@ pub fn read_buffer(id: usize, data_ptr: *mut u8, byte_len: usize) -> i32 {
 
     OK
 }
+
+/// Read GPU buffer results back, encode as Envelope V1, and broadcast via registered callback.
+pub fn read_buffer_and_broadcast(id: usize, path_ptr: *const std::os::raw::c_char, byte_len: usize) -> i32 {
+    if path_ptr.is_null() {
+        return ERR_NULL_PTR;
+    }
+
+    let path = unsafe {
+        match std::ffi::CStr::from_ptr(path_ptr).to_str() {
+            Ok(s) => s.to_owned(),
+            Err(_) => return ERR_INVALID_ARG,
+        }
+    };
+
+    let slot = match dispatcher_slot().lock() {
+        Ok(s) => s,
+        Err(_) => return ERR_NOT_INITIALIZED,
+    };
+    let dispatcher = match slot.as_ref() {
+        Some(d) => d,
+        None => return ERR_NOT_INITIALIZED,
+    };
+
+    let WgpuDispatcher {
+        ref device,
+        ref queue,
+        ref buffers,
+        ..
+    } = *dispatcher;
+
+    let gpu_buf = match buffers.get(&id) {
+        Some(b) => b,
+        None => return ERR_NOT_FOUND,
+    };
+
+    let readback = match gpu_buf.readback.as_ref() {
+        Some(r) => r,
+        None => return ERR_INVALID_ARG,
+    };
+
+    if byte_len > gpu_buf.size {
+        return ERR_INVALID_ARG;
+    }
+
+    // Copy GPU storage -> readback staging buffer
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Axis Readback Encoder"),
+    });
+    encoder.copy_buffer_to_buffer(&gpu_buf.buffer, 0, readback, 0, byte_len as wgpu::BufferAddress);
+    queue.submit(Some(encoder.finish()));
+
+    // Map and wait
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel();
+    readback.slice(..byte_len as u64).map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+
+    if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        return ERR_POLL_FAILED;
+    }
+
+    if rx.recv().map_err(|_| ()).and_then(|r| r.map_err(|_| ())).is_err() {
+        return ERR_MAP_FAILED;
+    }
+
+    let broadcast_fn = {
+        let guard = BROADCAST_CALLBACK.lock().unwrap();
+        match *guard {
+            Some(f) => f,
+            None => {
+                readback.unmap();
+                return ERR_INVALID_ARG; // No callback registered
+            }
+        }
+    };
+
+    {
+        let view = readback.slice(..byte_len as u64).get_mapped_range();
+        
+        // Pack directly into Envelope V1 format
+        let mut frame = Vec::with_capacity(17 + byte_len);
+        frame.push(1); // version = 1
+        frame.extend_from_slice(&1u16.to_le_bytes()); // contentType = 1 (Float32 Tensor)
+        frame.extend_from_slice(&0u16.to_le_bytes()); // flags = 0
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        frame.extend_from_slice(&ts.to_le_bytes()); // timestampNs
+        frame.extend_from_slice(&(byte_len as u32).to_le_bytes()); // payloadLen
+        frame.extend_from_slice(&view); // payload
+
+        unsafe {
+            let path_bytes = path.as_bytes();
+            broadcast_fn(
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                frame.as_ptr(),
+                frame.len(),
+            );
+        }
+    }
+    readback.unmap();
+
+    OK
+}
+
+/// Unified Dispatch, Readback, and Broadcast in a single CommandEncoder submission.
+/// This reduces PCIe/driver overhead by eliminating redundant queue.submit() calls.
+pub fn dispatch_and_read_broadcast(
+    pipeline_id: usize,
+    buffer_id: usize,
+    wg_x: u32,
+    wg_y: u32,
+    wg_z: u32,
+    path_ptr: *const std::os::raw::c_char,
+    byte_len: usize,
+) -> i32 {
+    if path_ptr.is_null() {
+        return ERR_NULL_PTR;
+    }
+    let path = unsafe {
+        match std::ffi::CStr::from_ptr(path_ptr).to_str() {
+            Ok(s) => s.to_owned(),
+            Err(_) => return ERR_INVALID_ARG,
+        }
+    };
+
+    let slot = match dispatcher_slot().lock() {
+        Ok(s) => s,
+        Err(_) => return ERR_NOT_INITIALIZED,
+    };
+    let dispatcher = match slot.as_ref() {
+        Some(d) => d,
+        None => return ERR_NOT_INITIALIZED,
+    };
+
+    let WgpuDispatcher {
+        ref device,
+        ref queue,
+        ref pipelines,
+        ref buffers,
+        ..
+    } = *dispatcher;
+
+    let pipeline = match pipelines.get(&pipeline_id) {
+        Some(p) => p,
+        None => return ERR_NOT_FOUND,
+    };
+
+    let gpu_buf = match buffers.get(&buffer_id) {
+        Some(b) => b,
+        None => return ERR_NOT_FOUND,
+    };
+
+    let readback = match gpu_buf.readback.as_ref() {
+        Some(r) => r,
+        None => return ERR_INVALID_ARG,
+    };
+
+    if byte_len > gpu_buf.size {
+        return ERR_INVALID_ARG;
+    }
+
+    // 1. Create a SINGLE CommandEncoder for the entire frame
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Axis Unified Frame Encoder"),
+    });
+
+    // 2. Compute Pass
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Axis Unified Compute Pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline.pipeline);
+        
+        let bind_group = match pipeline.bind_group.as_ref() {
+            Some(bg) => bg,
+            None => {
+                readback.unmap();
+                return ERR_INVALID_ARG;
+            }
+        };
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
+    }
+
+    // 3. Copy to Readback Staging
+    encoder.copy_buffer_to_buffer(&gpu_buf.buffer, 0, readback, 0, byte_len as wgpu::BufferAddress);
+
+    // 4. Submit ONCE to the GPU
+    queue.submit(Some(encoder.finish()));
+
+    // 5. Map and Wait (Synchronize)
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel();
+    readback.slice(..byte_len as u64).map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+
+    if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        return ERR_POLL_FAILED;
+    }
+    if rx.recv().map_err(|_| ()).and_then(|r| r.map_err(|_| ())).is_err() {
+        return ERR_MAP_FAILED;
+    }
+
+    // 6. Native Broadcast (Zero Julia Allocation)
+    let broadcast_fn = {
+        let guard = BROADCAST_CALLBACK.lock().unwrap();
+        match *guard {
+            Some(f) => f,
+            None => {
+                readback.unmap();
+                return ERR_INVALID_ARG;
+            }
+        }
+    };
+
+    {
+        let view = readback.slice(..byte_len as u64).get_mapped_range();
+        
+        let mut frame = Vec::with_capacity(17 + byte_len);
+        frame.push(1);
+        frame.extend_from_slice(&1u16.to_le_bytes());
+        frame.extend_from_slice(&0u16.to_le_bytes());
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        frame.extend_from_slice(&ts.to_le_bytes());
+        frame.extend_from_slice(&(byte_len as u32).to_le_bytes());
+        frame.extend_from_slice(&view);
+
+        unsafe {
+            let path_bytes = path.as_bytes();
+            broadcast_fn(
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                frame.as_ptr(),
+                frame.len(),
+            );
+        }
+    }
+    readback.unmap();
+
+    OK
+}
+
+/// Set the Fomalhaut broadcast callback pointer
+pub fn set_broadcast_callback(callback_ptr: *const std::ffi::c_void) -> i32 {
+    if callback_ptr.is_null() {
+        return ERR_NULL_PTR;
+    }
+    let mut guard = match BROADCAST_CALLBACK.lock() {
+        Ok(g) => g,
+        Err(_) => return ERR_PANIC,
+    };
+    unsafe {
+        let func: WsBroadcastFn = std::mem::transmute(callback_ptr);
+        *guard = Some(func);
+    }
+    OK
+}
+
 
 /// Create a compute pipeline from a WGSL source string.
 ///

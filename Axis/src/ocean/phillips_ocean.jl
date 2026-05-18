@@ -8,6 +8,7 @@ Public API :
 - create_sim(; resolution, component_count, ...) -> OceanSim
 - init!(sim)
 - compute_wave!(sim, t) / compute_wave!(sim, output, t)
+- update_params!(sim; wind_speed, wind_direction, amplitude_scale)
 - destroy!(sim)
 - phillips_spectrum(kx, ky, windx, windy)
 =#
@@ -24,8 +25,8 @@ function _alloc_sim_resources()
     base = id * 4
     return (
         buf_frame      = base - 3,
-        buf_phase_base = base - 2,
-        buf_components = base - 1,
+        buf_components = base - 2,
+        buf_phase0     = base - 1,
         buf_params     = base,
         pipeline_id    = id,
     )
@@ -52,18 +53,17 @@ mutable struct PhillipsSim <: AbstractOceanSim
     omega::Vector{Float32}
     amp::Vector{Float32}
     phase0::Vector{Float32}
-    phase_base::Matrix{Float32}
+    
     frame_buffer::Vector{Float32}
-    grid_x::Matrix{Float32}
-    grid_y::Matrix{Float32}
 
-    # Reusable params scratch buffer ( avoids 16-byte alloc every frame )
+    # Reusable scratch buffers ( avoids alloc on parameter updates )
     _params_buf::Vector{UInt8}
+    _components_buf::Vector{Float32}
 
     # GPU resource IDs ( unique per instance, keys into Rust's HashMaps )
     _buf_frame::Int
-    _buf_phase_base::Int
     _buf_components::Int
+    _buf_phase0::Int
     _buf_params::Int
     _pipeline_id::Int
 
@@ -97,9 +97,6 @@ function create_phillips_sim(;
     ds  = Float32(domain_size)
     n   = resolution
 
-    grid_x = Float32[((x - 1) / (n - 1) - 0.5f0) * ds for _ in 1:n, x in 1:n]
-    grid_y = Float32[((y - 1) / (n - 1) - 0.5f0) * ds for y in 1:n, _ in 1:n]
-
     return PhillipsSim(
         resolution, component_count,
         ds, Float32(gravity), Float32(wind_speed),
@@ -110,11 +107,10 @@ function create_phillips_sim(;
         Vector{Float32}(undef, component_count), # omega
         Vector{Float32}(undef, component_count), # amp
         Vector{Float32}(undef, component_count), # phase0
-        Matrix{Float32}(undef, n * n, component_count), # phase_base
         Vector{Float32}(undef, n * n), # frame_buffer
-        grid_x, grid_y,
         Vector{UInt8}(undef, 16), # _params_buf
-        ids.buf_frame, ids.buf_phase_base, ids.buf_components, ids.buf_params,
+        Vector{Float32}(undef, component_count * 4), # _components_buf
+        ids.buf_frame, ids.buf_components, ids.buf_phase0, ids.buf_params,
         ids.pipeline_id,
         false,
     )
@@ -125,27 +121,32 @@ WGSL compute shader ( Phillips Ocean kernel )
 =#
 const _OCEAN_WGSL = """
 struct Params {
-    frame_count     : u32,
+    resolution      : u32,
     component_count : u32,
     time            : f32,
-    _pad            : f32,
+    domain_size     : f32,
 }
 
 @group(0) @binding(0) var<storage, read_write> frame      : array<f32>;
-@group(0) @binding(1) var<storage, read>       phase_base : array<f32>;
-@group(0) @binding(2) var<storage, read>       components : array<vec4<f32>>;
-@group(0) @binding(3) var<uniform>             params     : Params;
+@group(0) @binding(1) var<storage, read>       components : array<vec4<f32>>; // (kx, ky, amp, dynamic_phase)
+@group(0) @binding(2) var<uniform>             params     : Params;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= params.frame_count) { return; }
+    let res = params.resolution;
+    if (idx >= res * res) { return; }
+
+    let ix = idx % res;
+    let iy = idx / res;
+    let x = (f32(ix) / f32(res - 1u) - 0.5) * params.domain_size;
+    let y = (f32(iy) / f32(res - 1u) - 0.5) * params.domain_size;
 
     var height = 0.0;
     for (var c = 0u; c < params.component_count; c = c + 1u) {
-        let data = components[c];
-        height   = height + data.y *
-            cos(phase_base[idx + c * params.frame_count] - data.x * params.time + data.z);
+        let comp = components[c];
+        let phase = comp.x * x + comp.y * y + comp.w;
+        height = height + comp.z * cos(phase);
     }
     frame[idx] = height;
 }
@@ -241,50 +242,33 @@ function build_components!(sim::PhillipsSim)
     return sim
 end
 
-"""
-    precompute_phase!(sim)
-
-Fill `sim.phase_base` with `kx·x + ky·y` for every grid point and component.
-"""
-function precompute_phase!(sim::PhillipsSim)
-    fc  = length(sim.grid_x)
-    cc  = sim.component_count
-    @inbounds for c in 1:cc
-        kxc = sim.kx[c]; kyc = sim.ky[c]
-        for i in 1:fc
-            sim.phase_base[i, c] = kxc * sim.grid_x[i] + kyc * sim.grid_y[i]
-        end
-    end
-    return sim
-end
-
 #= 
 GPU buffer packing helpers
 =#
-function _pack_components!(sim::PhillipsSim)
-    cc   = sim.component_count
-    data = Vector{Float32}(undef, cc * 4)
+function _pack_components!(sim::PhillipsSim, t::Float32 = 0f0)
+    cc  = sim.component_count
+    buf = sim._components_buf
     @inbounds for i in 1:cc
         b = (i - 1) * 4 + 1
-        data[b]     = sim.omega[i]
-        data[b + 1] = sim.amp[i]
-        data[b + 2] = sim.phase0[i]
-        data[b + 3] = 0f0
+        buf[b]     = sim.kx[i]
+        buf[b + 1] = sim.ky[i]
+        buf[b + 2] = sim.amp[i]
+        buf[b + 3] = sim.phase0[i] - sim.omega[i] * t
     end
-    return data
+    return buf
 end
 
-function _write_params!(sim::PhillipsSim, frame_count::Int, t::Float32)
+function _write_params!(sim::PhillipsSim, t::Float32)
     buf = sim._params_buf        # reuse pre-allocated 16-byte scratch — no alloc
-    buf[1:4]   .= reinterpret(UInt8, [UInt32(frame_count)])
+    buf[1:4]   .= reinterpret(UInt8, [UInt32(sim.resolution)])
     buf[5:8]   .= reinterpret(UInt8, [UInt32(sim.component_count)])
     buf[9:12]  .= reinterpret(UInt8, [t])
-    buf[13:16] .= reinterpret(UInt8, [0f0])
+    buf[13:16] .= reinterpret(UInt8, [sim.domain_size])
     return buf
 end
 
 #= 
-GPU upload
+GPU upload & Update
 =#
 """
     upload_buffers!(sim)
@@ -293,31 +277,61 @@ Create GPU buffers, compile the WGSL shader, and bind everything.
 Called automatically by `init!(sim)`.
 """
 function upload_buffers!(sim::PhillipsSim)
-    fc  = length(sim.frame_buffer)
+    fc  = sim.resolution * sim.resolution
     cc  = sim.component_count
 
     wgpu_create_buffer!(sim._buf_frame,      fc * 4,        BINDING_STORAGE_READ_WRITE)
-    wgpu_create_buffer!(sim._buf_phase_base, fc * cc * 4,   BINDING_STORAGE_READ)
     wgpu_create_buffer!(sim._buf_components, cc * 4 * 4,    BINDING_STORAGE_READ)
     wgpu_create_buffer!(sim._buf_params,     16,            BINDING_UNIFORM)
 
-    wgpu_write_buffer!(sim._buf_phase_base, sim.phase_base)
-    wgpu_write_buffer!(sim._buf_components, _pack_components!(sim))
-    wgpu_write_buffer!(sim._buf_params,     _write_params!(sim, fc, 0f0))
+    wgpu_write_buffer!(sim._buf_components, _pack_components!(sim, 0f0))
+    wgpu_write_buffer!(sim._buf_params,     _write_params!(sim, 0f0))
 
     binding_flags = UInt32[
         BINDING_STORAGE_READ_WRITE,
-        BINDING_STORAGE_READ,
         BINDING_STORAGE_READ,
         BINDING_UNIFORM,
     ]
     wgpu_create_compute_pipeline!(sim._pipeline_id, _OCEAN_WGSL, "main", binding_flags)
     wgpu_bind_buffers!(sim._pipeline_id,
-        [sim._buf_frame, sim._buf_phase_base, sim._buf_components, sim._buf_params])
+        [sim._buf_frame, sim._buf_components, sim._buf_params])
 
     sim._gpu_ready = true
     return sim
 end
+
+"""
+    update_params!(sim; kwargs...)
+
+Update wave generation parameters (wind, amplitude) dynamically, recalculate
+components on CPU, and upload changes directly to GPU buffers with zero allocation.
+"""
+function update_params!(sim::PhillipsSim; 
+    wind_speed::Union{Real, Nothing} = nothing,
+    wind_direction::Union{Tuple{<:Real, <:Real}, Nothing} = nothing,
+    amplitude_scale::Union{Real, Nothing} = nothing)
+    
+    changed = false
+    if wind_speed !== nothing
+        sim.wind_speed = Float32(wind_speed)
+        changed = true
+    end
+    if wind_direction !== nothing
+        sim.wind_direction = (Float32(wind_direction[1]), Float32(wind_direction[2]))
+        changed = true
+    end
+    if amplitude_scale !== nothing
+        sim.amplitude_scale = Float32(amplitude_scale)
+        changed = true
+    end
+    
+    if changed && sim._gpu_ready
+        build_components!(sim)
+        wgpu_write_buffer!(sim._buf_components, _pack_components!(sim))
+    end
+    return sim
+end
+
 
 #= 
 Full init
@@ -328,13 +342,11 @@ Full init
 Run the full initialisation sequence:
   1. Start WGPU dispatcher ( idempotent )
   2. Build wave components ( CPU )
-  3. Pre-compute phase grid ( CPU )
-  4. Upload buffers and compile WGSL shader ( GPU )
+  3. Upload buffers and compile WGSL shader ( GPU )
 """
 function init!(sim::PhillipsSim)
     wgpu_init!()
     build_components!(sim)
-    precompute_phase!(sim)
     upload_buffers!(sim)
     @info "PhillipsOcean Initialized" backend="wgpu ( Axis )"
     return sim
@@ -351,9 +363,10 @@ No heap allocation in the hot path.
 """
 function compute_wave!(sim::PhillipsSim, output::Vector{Float32}, t::Real)
     sim._gpu_ready || error("OceanSim not initialized — call init!(sim) first.")
-    fc = length(output)
+    fc = sim.resolution * sim.resolution
 
-    wgpu_write_buffer!(sim._buf_params, _write_params!(sim, fc, Float32(t)))
+    wgpu_write_buffer!(sim._buf_components, _pack_components!(sim, Float32(t)))
+    wgpu_write_buffer!(sim._buf_params, _write_params!(sim, Float32(t)))
     wgpu_dispatch!(sim._pipeline_id; wg_x = cld(fc, _WORKGROUP_SIZE))
     wgpu_read_buffer!(sim._buf_frame, output)
 
@@ -366,6 +379,23 @@ end
 Convenience overload — writes into `sim.frame_buffer`.
 """
 compute_wave!(sim::PhillipsSim, t::Real) = compute_wave!(sim, sim.frame_buffer, t)
+
+"""
+    compute_wave_and_broadcast!(sim, t, path)
+
+Dispatch the GPU ocean kernel for time `t`, readback directly in Rust, package as Envelope V1, and broadcast via registered callback to Fomalhaut.
+No heap allocation in the hot path.
+"""
+function compute_wave_and_broadcast!(sim::PhillipsSim, t::Real, path::String)
+    sim._gpu_ready || error("OceanSim not initialized — call init!(sim) first.")
+    fc = sim.resolution * sim.resolution
+
+    wgpu_write_buffer!(sim._buf_components, _pack_components!(sim, Float32(t)))
+    wgpu_write_buffer!(sim._buf_params, _write_params!(sim, Float32(t)))
+    wgpu_dispatch_and_read_broadcast!(sim._pipeline_id, sim._buf_frame, path, fc * 4; wg_x = cld(fc, _WORKGROUP_SIZE))
+
+    return nothing
+end
 
 #= 
 Cleanup
@@ -381,7 +411,6 @@ function destroy!(sim::PhillipsSim)
     sim._gpu_ready || return
     wgpu_destroy_pipeline!(sim._pipeline_id)
     wgpu_destroy_buffer!(sim._buf_frame)
-    wgpu_destroy_buffer!(sim._buf_phase_base)
     wgpu_destroy_buffer!(sim._buf_components)
     wgpu_destroy_buffer!(sim._buf_params)
     sim._gpu_ready = false

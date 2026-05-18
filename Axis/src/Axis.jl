@@ -10,6 +10,7 @@ export BINDING_STORAGE_READ, BINDING_STORAGE_READ_WRITE, BINDING_UNIFORM
 export wgpu_init!
 export wgpu_create_buffer!, wgpu_write_buffer!, wgpu_read_buffer!, wgpu_destroy_buffer!
 export wgpu_create_compute_pipeline!, wgpu_bind_buffers!, wgpu_dispatch!, wgpu_destroy_pipeline!
+export wgpu_read_buffer_and_broadcast!, wgpu_dispatch_and_read_broadcast!, axis_set_broadcast_callback
 export axis_rs_library_path, axis_rs_available
 export normalize2
 
@@ -24,6 +25,7 @@ module Ocean
     import ..Axis: wgpu_read_buffer!, wgpu_destroy_buffer!
     import ..Axis: wgpu_create_compute_pipeline!, wgpu_bind_buffers!
     import ..Axis: wgpu_dispatch!, wgpu_destroy_pipeline!
+    import ..Axis: wgpu_read_buffer_and_broadcast!, wgpu_dispatch_and_read_broadcast!, axis_set_broadcast_callback
     import ..Axis: normalize2
 
     #= 
@@ -37,8 +39,8 @@ module Ocean
     export AbstractOceanSim
     export PhillipsSim
     export create_phillips_sim, destroy!
-    export init!, compute_wave!
-    export phillips_spectrum, build_components!, precompute_phase!, upload_buffers!
+    export init!, compute_wave!, update_params!
+    export phillips_spectrum, build_components!, upload_buffers!
 end
 
 export Ocean
