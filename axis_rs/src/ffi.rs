@@ -49,32 +49,6 @@ pub unsafe extern "C" fn rust_wgpu_read_buffer(
     ffi_call!(wgpu_core::read_buffer(id, data_ptr, byte_len))
 }
 
-/// Read `byte_len` bytes from GPU buffer `id`, package it in an Envelope V1, and broadcast.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wgpu_read_buffer_and_broadcast(
-    id: usize,
-    path_ptr: *const c_char,
-    byte_len: usize,
-) -> i32 {
-    ffi_call!(wgpu_core::read_buffer_and_broadcast(id, path_ptr, byte_len))
-}
-
-/// Unified Dispatch, Readback, and Broadcast in a single CommandEncoder submission.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wgpu_dispatch_and_read_broadcast(
-    pipeline_id: usize,
-    buffer_id: usize,
-    wg_x: u32,
-    wg_y: u32,
-    wg_z: u32,
-    path_ptr: *const std::os::raw::c_char,
-    byte_len: usize,
-) -> i32 {
-    ffi_call!(wgpu_core::dispatch_and_read_broadcast(
-        pipeline_id, buffer_id, wg_x, wg_y, wg_z, path_ptr, byte_len
-    ))
-}
-
 /// Destroy GPU buffer `id` and free its memory.
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_wgpu_destroy_buffer(id: usize) -> i32 {
@@ -139,8 +113,3 @@ pub extern "C" fn rust_wgpu_destroy_pipeline(id: usize) -> i32 {
     ffi_call!(wgpu_core::destroy_pipeline(id))
 }
 
-/// Set the Fomalhaut broadcast callback pointer
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_axis_set_broadcast_callback(callback_ptr: *const std::ffi::c_void) -> i32 {
-    ffi_call!(wgpu_core::set_broadcast_callback(callback_ptr))
-}
