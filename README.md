@@ -13,10 +13,10 @@ IMPORTANT : This project is still in the development and testing stages, licensi
 
 ## Project Dependencies Guide
 
-**[ for Dependencies Details please see the end of this README ]**
-
 [![Julia](https://img.shields.io/badge/Julia-9558B2?style=for-the-badge&logo=julia&logoColor=white)](https://github.com/JuliaLang/julia)
 [![wgpu](https://img.shields.io/badge/wgpu-F04D23?style=for-the-badge&logo=rust&logoColor=white)](https://github.com/gfx-rs/wgpu)
+
+**[ for Dependencies Details please see the end of this README ]**
 
 Axis uses wgpu to call GPU on Rust side for computing. wgpu licensed under the MIT License & Apache-2.0 License.
 
