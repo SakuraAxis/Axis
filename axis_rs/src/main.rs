@@ -4,7 +4,7 @@ fn main() {
     println!("||||||  Axis GPU Diagnostics  ||||||");
 
     let instance = wgpu::Instance::default();
-    let adapters = instance.enumerate_adapters(Backends::all());
+    let adapters = axis_rs::wgpu_core::block_on(instance.enumerate_adapters(Backends::all()));
 
     if adapters.is_empty() {
         println!("No compatible GPU adapters found.");

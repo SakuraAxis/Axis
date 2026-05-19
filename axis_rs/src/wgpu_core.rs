@@ -54,7 +54,7 @@ impl Wake for ThreadWaker {
     }
 }
 
-pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
+pub fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::from(std::sync::Arc::new(ThreadWaker {
         thread: thread::current(),
     }));
