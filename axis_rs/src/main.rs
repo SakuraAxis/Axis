@@ -1,11 +1,10 @@
 use wgpu::Backends;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     println!("||||||  Axis GPU Diagnostics  ||||||");
 
     let instance = wgpu::Instance::default();
-    let adapters = instance.enumerate_adapters(Backends::all()).await;
+    let adapters = instance.enumerate_adapters(Backends::all());
 
     if adapters.is_empty() {
         println!("No compatible GPU adapters found.");
