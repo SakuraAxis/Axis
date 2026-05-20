@@ -6,7 +6,7 @@ Axis - a lightweight Julia -> Rust FFI bridge + wgpu compute dispatcher.
 Two distinct responsibilities :
   1. WGPU Dispatcher  : thin Julia wrappers around the axis_rs C-ABI, providing
                         buffer/pipeline/dispatch operations with zero overhead.
-  2. Rust Code Generator : @rust_fn / @rust_code macros + generate_bridge(),
+  2. Rust Code Generator : @rust_fn / @call_rust_fn / @rust_code macros + generate_bridge(),
                             letting callers embed Rust functions directly in their
                             Julia source files and emit professional Rust modules.
 
@@ -27,13 +27,15 @@ Usage example ( in Achernar's PhillipsOceanAX.jl ) :
         \"\"\"
     end
 
+    @AX.call_rust_fn pack_components!(pointer(kx), 0f0, pointer(out), Int32(length(kx)))
+
     # After all modules are loaded :
     AX.generate_bridge("path/to/axis_rs")
     # Then : cargo build --release  in axis_rs/
 =#
 
 include("types.jl")   # Julia -> Rust type mapping & name helpers
-include("codegen.jl") # @rust_fn, @rust_code, generate_bridge
+include("codegen.jl") # @rust_fn, @call_rust_fn, @rust_code, generate_bridge
 include("ffi.jl")     # wgpu_init!, wgpu_create_buffer!, wgpu_dispatch!, …
 
 #=
@@ -51,7 +53,7 @@ Math utilities
 
 #=
 Rust Code Generator public API
-  @rust_fn, @rust_code are accessible as AX.rust_fn / AX.rust_code via import.
+  @rust_fn, @call_rust_fn, @rust_code are accessible via AX-qualified macros.
   generate_bridge is a regular function.
 =#
 export generate_bridge
