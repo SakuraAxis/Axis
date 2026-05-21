@@ -24,6 +24,18 @@ Axis uses wgpu to call GPU on Rust side for computing. wgpu licensed under the M
 
 ### Start Test Script ( Mandelbrot Zoom )
 
+`julia`
+
+`] activate .`
+
+`instantiate`
+
+`dev ./Axis`
+
+and press backspace to close pkg mode
+
+press Ctrl + D to close Julia REPL
+
 `julia --project=. scripts/generate_mandelbrot_bridge.jl`
 
 `cd axis_rs`
