@@ -1,5 +1,5 @@
 # code that auto-gen by Axis
-src/generated/*
+src/axis_generated/*
 
 # target
 /target/

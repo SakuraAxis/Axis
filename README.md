@@ -36,14 +36,6 @@ and press backspace to close pkg mode
 
 press Ctrl + D to close Julia REPL
 
-`julia --project=. scripts/generate_mandelbrot_bridge.jl`
-
-`cd axis_rs`
-
-`cargo build --release`
-
-`cd ..`
-
 `julia --project=. --color=yes scripts/mandelbrot_wgpu_zoom.jl`
 
 ## Usage Guide

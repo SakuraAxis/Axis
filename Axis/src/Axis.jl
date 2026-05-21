@@ -45,7 +45,7 @@ export BINDING_STORAGE_READ, BINDING_STORAGE_READ_WRITE, BINDING_UNIFORM
 export wgpu_init!
 export wgpu_create_buffer!, wgpu_write_buffer!, wgpu_read_buffer!, wgpu_destroy_buffer!
 export wgpu_create_compute_pipeline!, wgpu_bind_buffers!, wgpu_dispatch!, wgpu_destroy_pipeline!
-export axis_rs_library_path, axis_rs_available
+export axis_rs_library_path, axis_rs_available, bridge_up, bridge_down
 
 #=
 Math utilities

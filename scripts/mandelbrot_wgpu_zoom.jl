@@ -173,9 +173,7 @@ function main()
     FRAMES   > 0 || error("frames must be positive")
     MAX_ITER > 0 || error("max_iter must be positive")
 
-    AX.axis_rs_available() ||
-        error("Axis Rust library is not available at $(AX.axis_rs_library_path()). " *
-              "Run scripts/generate_mandelbrot_bridge.jl, then build axis_rs with `cargo build --release`.")
+    AX.bridge_up(abspath(joinpath(@__DIR__, "..", "axis_rs")))
 
     AX.wgpu_init!()
 
