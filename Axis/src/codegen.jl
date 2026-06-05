@@ -156,10 +156,13 @@ macro rust_fn(expr)
         fn_body
     )
 
+    mod_registration = :(Axis.register_module_info(::Val{$(Expr(:quote, Symbol(rust_mod)))}) = $mod_info)
+
     # Return a flat Expr(:block) so that Core.@doc can inspect and document fn_expr correctly
     return Expr(:block,
         __source__,
         registration,
+        mod_registration,
         fn_expr
     )
 end
@@ -219,6 +222,7 @@ macro rust_code(code_str)
 
     return quote
         Axis.register_rust_code(::Val{$(Expr(:quote, Symbol(rust_mod)))}, ::Val{$unique_id}) = $code_str
+        Axis.register_module_info(::Val{$(Expr(:quote, Symbol(rust_mod)))}) = $mod_info
     end
 end
 
@@ -254,8 +258,19 @@ function generate_bridge(output_dir::String; bindings_path::Union{String,Nothing
     known_rust_fn_names = Dict{String, String}() # name => mod
 
     modules_metadata = Dict{String, NamedTuple}()
+
+    # 1. Retrieve the uppercase original filenames of all modules from the dedicated metadata table
+    for m in methods(register_module_info)
+        if length(m.sig.parameters) == 2
+            val_type = m.sig.parameters[2]
+            if val_type <: Val
+                mod_sym = val_type.parameters[1]
+                modules_metadata[string(mod_sym)] = register_module_info(Val(mod_sym))
+            end
+        end
+    end
  
-    # 1. Gather all @rust_fn registrations from register_rust_fn method table
+    # 2. Gather all @rust_fn registrations from register_rust_fn method table
     for m in methods(register_rust_fn)
         if length(m.sig.parameters) == 2
             val_type = m.sig.parameters[2]
@@ -280,7 +295,7 @@ function generate_bridge(output_dir::String; bindings_path::Union{String,Nothing
         end
     end
  
-    # 2. Gather all @rust_code registrations from register_rust_code method table
+    # 3. Gather all @rust_code registrations from register_rust_code method table
     for m in methods(register_rust_code)
         if length(m.sig.parameters) == 3
             mod_type = m.sig.parameters[2]

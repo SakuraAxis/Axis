@@ -6,6 +6,7 @@ Used by codegen.jl to generate FFI-compatible Rust signatures.
 # Precompilation-safe method-based registries
 function register_rust_fn end
 function register_rust_code end
+function register_module_info end
 
 const _JULIA_TO_RUST_TYPE = Dict{Any, String}(
     :Float32  => "f32",
