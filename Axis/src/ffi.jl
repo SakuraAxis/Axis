@@ -301,6 +301,9 @@ function bridge_up(axis_rs_path::String)
     # Release the lock on the shared library file so cargo build can overwrite/re-create it on Windows.
     _close_axis_rs!()
 
+    @info "Axis.bridge_up: running `cargo fmt`..." axis_rs_path
+    status = run(Cmd(`cargo fmt`; dir=axis_rs_path))
+
     @info "Axis.bridge_up: running `cargo build --release`..." axis_rs_path
     status = run(Cmd(`cargo build --release`; dir=axis_rs_path))
 

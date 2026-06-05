@@ -98,12 +98,7 @@ pub unsafe extern "C" fn rust_wgpu_bind_buffers(
 
 /// Dispatch a compute pipeline with the given workgroup counts.
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_wgpu_dispatch(
-    pipeline_id: usize,
-    wg_x: u32,
-    wg_y: u32,
-    wg_z: u32,
-) -> i32 {
+pub extern "C" fn rust_wgpu_dispatch(pipeline_id: usize, wg_x: u32, wg_y: u32, wg_z: u32) -> i32 {
     ffi_call!(wgpu_core::dispatch(pipeline_id, wg_x, wg_y, wg_z))
 }
 
@@ -112,4 +107,3 @@ pub extern "C" fn rust_wgpu_dispatch(
 pub extern "C" fn rust_wgpu_destroy_pipeline(id: usize) -> i32 {
     ffi_call!(wgpu_core::destroy_pipeline(id))
 }
-

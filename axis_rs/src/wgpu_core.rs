@@ -155,12 +155,20 @@ pub fn create_buffer(id: usize, size: usize, binding_type: u32) -> i32 {
     }
 
     let (usage, needs_readback) = match binding_type {
-        BINDING_STORAGE_READ => (wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, false),
+        BINDING_STORAGE_READ => (
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            false,
+        ),
         BINDING_STORAGE_READ_WRITE => (
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             true,
         ),
-        BINDING_UNIFORM => (wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, false),
+        BINDING_UNIFORM => (
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            false,
+        ),
         _ => return ERR_INVALID_ARG,
     };
 
@@ -182,7 +190,14 @@ pub fn create_buffer(id: usize, size: usize, binding_type: u32) -> i32 {
         None
     };
 
-    dispatcher.buffers.insert(id, GpuBuffer { buffer, size, readback });
+    dispatcher.buffers.insert(
+        id,
+        GpuBuffer {
+            buffer,
+            size,
+            readback,
+        },
+    );
     OK
 }
 
@@ -257,21 +272,34 @@ pub fn read_buffer(id: usize, data_ptr: *mut u8, byte_len: usize) -> i32 {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("Axis Readback Encoder"),
     });
-    encoder.copy_buffer_to_buffer(&gpu_buf.buffer, 0, readback, 0, byte_len as wgpu::BufferAddress);
+    encoder.copy_buffer_to_buffer(
+        &gpu_buf.buffer,
+        0,
+        readback,
+        0,
+        byte_len as wgpu::BufferAddress,
+    );
     queue.submit(Some(encoder.finish()));
 
     // Map and wait
     use std::sync::mpsc;
     let (tx, rx) = mpsc::channel();
-    readback.slice(..byte_len as u64).map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
+    readback
+        .slice(..byte_len as u64)
+        .map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
 
     if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
         return ERR_POLL_FAILED;
     }
 
-    if rx.recv().map_err(|_| ()).and_then(|r| r.map_err(|_| ())).is_err() {
+    if rx
+        .recv()
+        .map_err(|_| ())
+        .and_then(|r| r.map_err(|_| ()))
+        .is_err()
+    {
         return ERR_MAP_FAILED;
     }
 
@@ -313,8 +341,7 @@ pub fn create_compute_pipeline(
             Err(_) => return ERR_INVALID_ARG,
         }
     };
-    let binding_flags =
-        unsafe { std::slice::from_raw_parts(binding_flags_ptr, binding_count) };
+    let binding_flags = unsafe { std::slice::from_raw_parts(binding_flags_ptr, binding_count) };
 
     let mut slot = match dispatcher_slot().lock() {
         Ok(s) => s,
@@ -385,17 +412,16 @@ pub fn create_compute_pipeline(
             source: wgpu::ShaderSource::Wgsl(wgsl.into()),
         });
 
-    let pipeline =
-        dispatcher
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(&format!("Axis Compute Pipeline {id}")),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some(&entry),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                cache: None,
-            });
+    let pipeline = dispatcher
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(&format!("Axis Compute Pipeline {id}")),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some(&entry),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
 
     dispatcher.pipelines.insert(
         id,
@@ -412,16 +438,11 @@ pub fn create_compute_pipeline(
 
 /// Bind a list of GPU buffers to a pipeline ( in binding-index order ).
 /// Must be called after create_compute_pipeline and create_buffer.
-pub fn bind_buffers(
-    pipeline_id: usize,
-    buffer_ids_ptr: *const usize,
-    buffer_count: usize,
-) -> i32 {
+pub fn bind_buffers(pipeline_id: usize, buffer_ids_ptr: *const usize, buffer_count: usize) -> i32 {
     if buffer_ids_ptr.is_null() {
         return ERR_NULL_PTR;
     }
-    let buffer_ids =
-        unsafe { std::slice::from_raw_parts(buffer_ids_ptr, buffer_count) };
+    let buffer_ids = unsafe { std::slice::from_raw_parts(buffer_ids_ptr, buffer_count) };
 
     let mut slot = match dispatcher_slot().lock() {
         Ok(s) => s,
