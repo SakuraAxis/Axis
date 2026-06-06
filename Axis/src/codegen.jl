@@ -156,7 +156,17 @@ macro rust_fn(expr)
         fn_body
     )
 
-    mod_registration = :(Axis.register_module_info(::Val{$(Expr(:quote, Symbol(rust_mod)))}) = $mod_info)
+    mod_registration = quote
+        if !hasmethod(Axis.register_module_info, Tuple{Val{$(Expr(:quote, Symbol(rust_mod)))}})
+            Axis.register_module_info(::Val{$(Expr(:quote, Symbol(rust_mod)))}) = $mod_info
+        else
+            existing = Axis.register_module_info(Val{$(Expr(:quote, Symbol(rust_mod)))}())
+            if existing != $mod_info
+                @warn "Axis.register_module_info conflict for module '$rust_mod'. " *
+                      "Keeping first registered metadata." existing=existing new=$mod_info
+            end
+        end
+    end
 
     # Return a flat Expr(:block) so that Core.@doc can inspect and document fn_expr correctly
     return Expr(:block,
@@ -222,7 +232,15 @@ macro rust_code(code_str)
 
     return quote
         Axis.register_rust_code(::Val{$(Expr(:quote, Symbol(rust_mod)))}, ::Val{$unique_id}) = $code_str
-        Axis.register_module_info(::Val{$(Expr(:quote, Symbol(rust_mod)))}) = $mod_info
+        if !hasmethod(Axis.register_module_info, Tuple{Val{$(Expr(:quote, Symbol(rust_mod)))}})
+            Axis.register_module_info(::Val{$(Expr(:quote, Symbol(rust_mod)))}) = $mod_info
+        else
+            existing = Axis.register_module_info(Val{$(Expr(:quote, Symbol(rust_mod)))}())
+            if existing != $mod_info
+                @warn "Axis.register_module_info conflict for module '$rust_mod'. " *
+                      "Keeping first registered metadata." existing=existing new=$mod_info
+            end
+        end
     end
 end
 
