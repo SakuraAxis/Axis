@@ -1,5 +1,3 @@
-![logo-design](https://github.com/SakuraAxis/Axis/blob/main/logo/design.webp)
-
 # Axis FFI
 
 ![GitHub last commit](https://img.shields.io/github/last-commit/zzztzzzt/SakuraEngine.jl.svg)
